@@ -1,0 +1,3 @@
+echo "running dirprofile"
+
+alias devsfs="go run /Users/kuvam/sfs/cli/cmd/main/main.go"

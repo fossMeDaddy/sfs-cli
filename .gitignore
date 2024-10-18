@@ -1,0 +1,7 @@
+ignore/
+tmp/
+bin/
+
+.env
+.env.*
+*.db
