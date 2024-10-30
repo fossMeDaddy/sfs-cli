@@ -1,8 +1,5 @@
 # Simple Fucking Storage (SFS) [WIP]
 
-If you fear this name is not safe for your work, consider using "Simple File Storage"
-also... I feel sorry for your company if you ever need to use this lamer version of the name.
-
 ## Basic Idea
 
 A wrapper on top of your existing storage solutions like AWS's S3 or Cloudflare's R2.
