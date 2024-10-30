@@ -1,5 +1,7 @@
 # Simple Fucking Storage (SFS) [WIP]
 
+Use "Simple File Storage" for scenarios when you really can't use any NSFW words :)
+
 ## Basic Idea
 
 A wrapper on top of your existing storage solutions like AWS's S3 or Cloudflare's R2.
