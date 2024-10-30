@@ -5,6 +5,8 @@ also... I feel sorry for your company if you ever need to use this lamer version
 
 ## Basic Idea
 
+A wrapper on top of your existing storage solutions like AWS's S3 or Cloudflare's R2.
+
 Let me lay down a mental model of how SFS is a necessary and actually a good abstraction over traditional key-value mapped object storage solutions.
 
 SFS creates an imaginary file system for you, which is intended to be like the file system you have on your machine.
