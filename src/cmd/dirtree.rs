@@ -384,7 +384,6 @@ impl CliSubCmd for LsCommand {
 
             pretty_file_sizes.push(pretty_file_size);
         });
-        println!("{} {}", file_size_padding, file_type_padding);
 
         for (file, pretty_file_size) in res.files.iter().zip(pretty_file_sizes.iter()) {
             let mut emo_tags = String::new();
@@ -456,10 +455,16 @@ impl CliSubCmd for RmCommand {
                 .expect("current WD incorrectly set, please switch to a valid WD!"),
         };
 
-        for filename in &self.filenames {
-            // spawn async task to delete the file
-        }
-        // log the errors
-        // if everything ok, print success
+        api::fs_files::delete_files(
+            &config,
+            &api::fs_files::DeleteFilesReqBody {
+                dir_id: &subtree.id,
+                file_names: &self.filenames,
+            },
+        )
+        .await
+        .expect("error occured while deleteing files!");
+
+        println!("{}", String::from("Deleted files successfully!").bold())
     }
 }

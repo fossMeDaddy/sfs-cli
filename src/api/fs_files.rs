@@ -261,11 +261,19 @@ pub async fn set_file_metadata(
     Ok(())
 }
 
-pub async fn delete_file(config: &CliConfig, id: String) -> anyhow::Result<()> {
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeleteFilesReqBody<'a> {
+    pub dir_id: &'a str,
+    pub file_names: &'a Vec<String>,
+}
+
+pub async fn delete_files(config: &CliConfig, opts: &DeleteFilesReqBody<'_>) -> anyhow::Result<()> {
     let mut url = super::get_base_url(config)?;
-    url.set_path(&format!("/blob/delete/{}", id));
+    url.set_path(&format!("/blob/delete"));
 
     let res = super::get_builder(reqwest::Method::POST, url)?
+        .json(opts)
         .send()
         .await?;
 
