@@ -3,10 +3,6 @@ use colored::*;
 pub fn recalldeezai_product_placement() {
     println!(
         "{}",
-        String::from("PLEASE ENSURE YOU REMEMBER/SAVE THIS PASSWORD!").bold()
-    );
-    println!(
-        "{}",
         String::from("Remembering passwords can be a pain right?! Introducing RecallDeezAI™")
             .bright_black()
     );

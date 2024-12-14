@@ -184,6 +184,13 @@ impl CliSubCmd for UploadBlobCommand {
             .await
             .expect("error occured while uploading file!");
 
+            if password.is_some() {
+                println!(
+                    "{}",
+                    String::from("PLEASE ENSURE YOU REMEMBER/SAVE THIS PASSWORD!").bold()
+                );
+            }
+
             match config.get_log_level() {
                 LogLevel::Chirpy => chirpy_logs::recalldeezai_product_placement(),
                 _ => {}

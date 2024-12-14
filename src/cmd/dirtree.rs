@@ -455,7 +455,7 @@ impl CliSubCmd for RmCommand {
                 .expect("current WD incorrectly set, please switch to a valid WD!"),
         };
 
-        api::fs_files::delete_files(
+        let deleted_files = api::fs_files::delete_files(
             &config,
             &api::fs_files::DeleteFilesReqBody {
                 dir_id: &subtree.id,
@@ -465,6 +465,9 @@ impl CliSubCmd for RmCommand {
         .await
         .expect("error occured while deleteing files!");
 
-        println!("{}", String::from("Deleted files successfully!").bold())
+        println!(
+            "{}",
+            format!("Deleted {} files successfully!", deleted_files.len()).bold()
+        )
     }
 }

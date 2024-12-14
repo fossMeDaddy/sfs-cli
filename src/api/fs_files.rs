@@ -268,7 +268,10 @@ pub struct DeleteFilesReqBody<'a> {
     pub file_names: &'a Vec<String>,
 }
 
-pub async fn delete_files(config: &CliConfig, opts: &DeleteFilesReqBody<'_>) -> anyhow::Result<()> {
+pub async fn delete_files(
+    config: &CliConfig,
+    opts: &DeleteFilesReqBody<'_>,
+) -> anyhow::Result<Vec<FsFile>> {
     let mut url = super::get_base_url(config)?;
     url.set_path(&format!("/blob/delete"));
 
@@ -287,5 +290,10 @@ pub async fn delete_files(config: &CliConfig, opts: &DeleteFilesReqBody<'_>) -> 
         ));
     }
 
-    Ok(())
+    let res_data: ApiResponse<Vec<FsFile>> = res.json().await?;
+    let data = res_data
+        .data
+        .ok_or(anyhow::anyhow!("'data' came null in api response!"))?;
+
+    Ok(data)
 }
