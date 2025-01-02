@@ -8,6 +8,7 @@ use crate::{shared_types::CliSubCmd, utils::paths::get_paths_from_pattern};
 
 #[derive(Parser)]
 pub struct ServeCommand {
+    /// list of path patterns e.g. "/myprivatedir/**/img_*.{jpeg|jpg|png|webp|pdf}"
     patterns: Vec<String>,
 }
 

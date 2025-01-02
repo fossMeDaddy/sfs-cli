@@ -6,4 +6,7 @@ pub mod filters;
 pub mod local_auth;
 pub mod net;
 pub mod paths;
+pub mod str2x;
+pub mod term;
 pub mod tokens;
+pub mod url;

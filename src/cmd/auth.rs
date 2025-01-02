@@ -1,12 +1,12 @@
 use clap::{Parser, Subcommand};
 use colored::*;
 use inquire::Text;
-use serde::Deserialize;
 
 use crate::{
     api,
     config::CONFIG,
-    shared_types::{AccessToken, ApiKey, CliSubCmd},
+    shared_types::{AppContext, CliSubCmd},
+    state::STATE,
     utils::local_auth,
 };
 
@@ -25,11 +25,14 @@ enum Commands {
 
 impl AuthCommand {
     async fn handle_login(&self) {
-        let config = CONFIG.try_lock().unwrap();
+        let ctx = AppContext {
+            config: &CONFIG.try_lock().unwrap(),
+            state: &STATE.try_lock().unwrap(),
+        };
 
         println!(
             "Please copy and paste this oauth url in your browser:\n{}\n",
-            config.get_gh_login_uri().blue(),
+            ctx.config.get_gh_login_uri().blue(),
         );
 
         print!("{}", String::from("Note: ").bright_black());
@@ -48,26 +51,13 @@ impl AuthCommand {
 
         let code = Text::new("Enter login code:").prompt().unwrap();
 
-        #[derive(Deserialize)]
-        struct Res {
-            access_tokens: AccessToken,
-            api_keys: ApiKey,
-        }
-
-        let mut url = api::get_base_url(&config).expect("invalid url provided!");
-        url.set_path("auth/gh-cli-login");
-        url.set_query(Some(format!("key={}", code)).as_deref());
-
-        let req = api::get_builder(reqwest::Method::GET, url)
-            .unwrap()
-            .send()
+        let credentials = api::auth::login(&ctx, &code)
             .await
-            .unwrap();
-        let response: Res = req.json().await.unwrap();
+            .expect("Error occured while logging in!");
 
         let local_auth_data = local_auth::LocalAuthData {
-            access_token: response.access_tokens,
-            api_key: response.api_keys,
+            access_token: credentials.access_token,
+            api_key: credentials.api_key,
         };
         local_auth_data
             .save()

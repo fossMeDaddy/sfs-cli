@@ -43,3 +43,31 @@ pub fn get_absolute_path(path: &str, wd: &str) -> String {
 
     return String::from("/") + &abs_path.join("/");
 }
+
+pub fn split_path(path: &str) -> (&str, &str) {
+    let split_i = path
+        .chars()
+        .rev()
+        .enumerate()
+        .find_map(|(i, c)| if c == '/' { Some(i) } else { None });
+
+    match split_i {
+        Some(i) => path.split_at(path.len() - i),
+        None => (path, ""),
+    }
+}
+
+pub fn join_paths(paths: Vec<&str>) -> String {
+    let mut segs_iter = paths.iter();
+
+    let mut path_str = String::from(segs_iter.next().unwrap_or(&"/").trim_end_matches("/"));
+    for seg in segs_iter {
+        let seg_str = seg.trim().trim_matches('/');
+        if seg_str.len() > 0 {
+            path_str += "/";
+            path_str += seg_str;
+        }
+    }
+
+    path_str
+}

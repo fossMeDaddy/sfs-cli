@@ -82,7 +82,7 @@ impl DirTree {
         Some(currentdir)
     }
 
-    pub fn split_path<'a>(&self, dirpath: &'a str) -> Option<(&Self, Option<&'a str>)> {
+    pub fn split<'a>(&self, dirpath: &'a str) -> Option<(&Self, Option<&'a str>)> {
         if let Some(subtree) = self.get_sub_tree(dirpath) {
             Some((subtree, None))
         } else {

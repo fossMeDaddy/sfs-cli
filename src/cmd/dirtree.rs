@@ -1,17 +1,24 @@
 use clap::Parser;
 use colored::Colorize;
 use serde::Serialize;
+use serde_json::json;
 
 use crate::{
     api::{
         self,
+        dirtree::MvOpts,
         fs_files::{CliColFilters, Filter, FilterCol, FilterOp, GetFilesOpts, Order, OrderCol},
     },
     config::CONFIG,
     constants,
-    shared_types::{ApiResponse, CliSubCmd, DirTree},
-    utils,
+    shared_types::{
+        AccessToken, AccessTokenPermission, ApiResponse, AppContext, CliSubCmd, DirTree,
+    },
+    state::STATE,
+    utils::{self, files},
 };
+
+use super::tokens::ExpInput;
 
 #[derive(Parser)]
 pub struct TreeCommand {
@@ -37,22 +44,44 @@ pub struct RmdirCommand {
 }
 
 #[derive(Parser)]
+pub struct RmCommand {
+    /// names of the files to delete in the selected directory
+    filenames: Vec<String>,
+
+    #[arg(long)]
+    /// path of the remote dir containing the files to be deleted (defaults to currently set WD)
+    dirpath: Option<String>,
+}
+
+#[derive(Parser)]
 pub struct MvdirCommand {
-    /// full path to the directory to move
+    /// path of the directory to move
     dirpath: String,
 
-    /// full path to the new location of the directory
+    /// the new location of the directory
     new_dirpath: String,
 }
 
 #[derive(Parser)]
-pub struct SetwdCommand {
+pub struct MvCommand {
+    /// path of the file to move
+    filepath: String,
+
+    /// new location of the file
+    new_filepath: String,
+}
+
+#[derive(Parser)]
+pub struct Cd {
     /// full path to the directory to set as working directory.
     dirpath: String,
 }
 
 #[derive(Parser)]
 pub struct LsCommand {
+    /// specify path to the remote directory to list files of. defaults to currently selected WD
+    dirpath: Option<String>,
+
     #[arg(short, long)]
     /// limit number of files received
     limit: Option<usize>,
@@ -97,13 +126,12 @@ pub struct LsCommand {
 pub struct PwdCommand;
 
 #[derive(Parser)]
-pub struct RmCommand {
-    /// names of the files to delete in the selected directory
-    filenames: Vec<String>,
+pub struct UrlCommand {
+    /// path to file, can eb relative to currently set WD or can be absolute starting with "/"
+    path: String,
 
-    #[arg(long)]
-    /// path of the remote dir containing the files to be deleted (defaults to currently set WD)
-    dirpath: Option<String>,
+    #[command(flatten)]
+    exp_input: ExpInput,
 }
 
 #[derive(Serialize, Debug)]
@@ -113,10 +141,13 @@ struct Req<'a> {
 
 impl CliSubCmd for TreeCommand {
     async fn run(&self) {
-        let config = CONFIG.try_lock().unwrap();
-        let wd = config.get_wd();
+        let ctx = AppContext {
+            config: &CONFIG.try_lock().unwrap(),
+            state: &STATE.try_lock().unwrap(),
+        };
+        let wd = ctx.config.get_wd();
 
-        let res = api::dirtree::get_dirtree(&config)
+        let res = api::dirtree::get_dirtree(&ctx)
             .await
             .expect("Unexpected error occured while fetching dirtree!");
 
@@ -134,7 +165,10 @@ impl CliSubCmd for TreeCommand {
         let subtree = match res.dirtree.get_sub_tree(&abs_path) {
             Some(dirtree) => dirtree,
             None => {
-                println!("Invalid path provided, no path matching the given path exists!");
+                println!(
+                    "Invalid path '{}' provided, no path matching the given path exists!",
+                    abs_path
+                );
                 return;
             }
         };
@@ -146,12 +180,15 @@ impl CliSubCmd for TreeCommand {
 
 impl CliSubCmd for MkdirCommand {
     async fn run(&self) {
-        let config = CONFIG.try_lock().unwrap();
+        let ctx = AppContext {
+            config: &CONFIG.try_lock().unwrap(),
+            state: &STATE.try_lock().unwrap(),
+        };
 
-        let mut url = api::get_base_url(&config).expect("invalid url!");
+        let mut url = api::get_base_url(&ctx).expect("invalid url!");
         url.set_path("fs/mkdir");
 
-        let wd = config.get_wd();
+        let wd = ctx.config.get_wd();
 
         let dirpath = match &self.dirpath {
             Some(dirpath) => &utils::dirtree::get_absolute_path(&dirpath, wd),
@@ -190,12 +227,15 @@ impl CliSubCmd for MkdirCommand {
 
 impl CliSubCmd for RmdirCommand {
     async fn run(&self) {
-        let config = CONFIG.try_lock().unwrap();
+        let ctx = AppContext {
+            config: &CONFIG.try_lock().unwrap(),
+            state: &STATE.try_lock().unwrap(),
+        };
 
-        let mut url = api::get_base_url(&config).expect("config issue, cannot fetch base url");
+        let mut url = api::get_base_url(&ctx).expect("config issue, cannot fetch base url");
         url.set_path("fs/rmdir");
 
-        let wd = config.get_wd();
+        let wd = ctx.config.get_wd();
 
         let req = Req {
             path: &utils::dirtree::get_absolute_path(&self.dirpath, wd),
@@ -229,12 +269,15 @@ impl CliSubCmd for RmdirCommand {
 
 impl CliSubCmd for MvdirCommand {
     async fn run(&self) {
-        let config = CONFIG.try_lock().unwrap();
+        let ctx = AppContext {
+            config: &CONFIG.try_lock().unwrap(),
+            state: &STATE.try_lock().unwrap(),
+        };
 
-        let mut url = api::get_base_url(&config).expect("config issue, cannot fetch base url");
+        let mut url = api::get_base_url(&ctx).expect("config issue, cannot fetch base url");
         url.set_path("fs/mvdir");
 
-        let wd = config.get_wd();
+        let wd = ctx.config.get_wd();
 
         #[derive(Serialize)]
         #[serde(rename_all = "camelCase")]
@@ -265,15 +308,17 @@ impl CliSubCmd for MvdirCommand {
     }
 }
 
-impl CliSubCmd for SetwdCommand {
+impl CliSubCmd for Cd {
     async fn run(&self) {
-        let mut config_mut = CONFIG.try_lock().unwrap();
-
-        let res = api::dirtree::get_dirtree(&config_mut)
+        let ctx = AppContext {
+            config: &CONFIG.try_lock().unwrap(),
+            state: &STATE.try_lock().unwrap(),
+        };
+        let res = api::dirtree::get_dirtree(&ctx)
             .await
             .expect("Unexpected error occured while fetching dirtree!");
 
-        let wd = config_mut.get_wd();
+        let wd = ctx.config.get_wd();
 
         let dirpath = &utils::dirtree::get_absolute_path(&self.dirpath, wd);
         let sub_dirtree = res.dirtree.get_sub_tree(dirpath);
@@ -282,6 +327,9 @@ impl CliSubCmd for SetwdCommand {
             return;
         }
 
+        drop(ctx);
+
+        let mut config_mut = CONFIG.try_lock().unwrap();
         config_mut
             .set_wd(&dirpath)
             .expect("Error occured while setting a working directory!");
@@ -300,21 +348,21 @@ impl CliSubCmd for PwdCommand {
 
 impl CliSubCmd for LsCommand {
     async fn run(&self) {
-        let config = CONFIG.try_lock().unwrap();
-        let wd = config.get_wd();
+        let ctx = AppContext {
+            config: &CONFIG.try_lock().unwrap(),
+            state: &STATE.try_lock().unwrap(),
+        };
+        let wd = ctx.config.get_wd();
 
         let page = self.page.unwrap_or(1);
 
-        let res = api::dirtree::get_dirtree(&config)
-            .await
-            .expect("error occured while fetching dirtree");
-
-        let subtree = res.dirtree.get_sub_tree(wd).expect(
-            "cannot fetch correct dirtree, are you sure you're in a valid working directory?",
-        );
-
         let mut filters: Vec<Filter> = vec![];
         filters.extend(self.filters.parse_get_filters().expect("invalid filters!"));
+
+        let dirpath = match &self.dirpath {
+            Some(dirpath) => utils::dirtree::get_absolute_path(dirpath, wd),
+            None => wd.to_string(),
+        };
 
         if self.trash {
             filters.push(Filter(
@@ -358,13 +406,14 @@ impl CliSubCmd for LsCommand {
         }
 
         let get_file_opts = GetFilesOpts {
-            filters: Some(filters),
+            dir_path: &dirpath,
+            filters: Some(&filters),
             limit: self.limit,
             page: self.page,
             order_by: self.order_by,
             order: self.order,
         };
-        let res = api::fs_files::get_files(&config, &subtree.id, Some(get_file_opts))
+        let res = api::fs_files::get_files(&ctx, Some(get_file_opts))
             .await
             .expect("error occured while fetching fetching files");
 
@@ -377,9 +426,9 @@ impl CliSubCmd for LsCommand {
         let mut file_type_padding = 0;
         let mut file_size_padding = 0;
         res.files.iter().for_each(|f| {
-            let pretty_file_size = f.get_pretty_size();
+            let pretty_file_size = utils::files::get_pretty_size(f.file_size);
 
-            file_type_padding = file_type_padding.max(f.file_type.to_string().len());
+            file_type_padding = file_type_padding.max(f.get_filetype().len());
             file_size_padding = file_size_padding.max(pretty_file_size.len());
 
             pretty_file_sizes.push(pretty_file_size);
@@ -399,13 +448,13 @@ impl CliSubCmd for LsCommand {
             print!(
                 "{} ",
                 file.created_at
-                    .format("%Y-%m-%d %H:%M:%S")
+                    .format(constants::LOCAL_DATETIME_FORMAT)
                     .to_string()
                     .dimmed()
                     .magenta()
             );
             print!("{0:>1$} ", pretty_file_size.bold(), file_size_padding);
-            print!("{0:>1$} ", file.file_type.dimmed(), file_type_padding);
+            print!("{0:>1$} ", file.get_filetype().dimmed(), file_type_padding);
             print!("{} ", file.name.bold().cyan());
             print!("{} ", emo_tags);
             println!();
@@ -424,7 +473,7 @@ impl CliSubCmd for LsCommand {
                 res.count
             )
             .dimmed(),
-            wd.bold()
+            dirpath.bold()
         );
     }
 }
@@ -435,30 +484,38 @@ impl CliSubCmd for RmCommand {
             println!("{}", String::from("no file names provided.").red());
         }
 
-        let config = CONFIG.try_lock().unwrap();
+        let ctx = AppContext {
+            config: &CONFIG.try_lock().unwrap(),
+            state: &STATE.try_lock().unwrap(),
+        };
+        let wd = ctx.config.get_wd();
 
-        let wd = config.get_wd();
-
-        let res = api::dirtree::get_dirtree(&config)
+        let res = api::dirtree::get_dirtree(&ctx)
             .await
             .expect("error occured while fetching dirtree!");
-        let subtree = match &self.dirpath {
+
+        let dirpath = match &self.dirpath {
             Some(dirpath) => {
                 let abs_path = utils::dirtree::get_absolute_path(dirpath, wd);
                 res.dirtree
                     .get_sub_tree(&abs_path)
-                    .expect("provided dirpath does not exist!")
+                    .expect("provided dirpath does not exist!");
+
+                dirpath
             }
-            None => res
-                .dirtree
-                .get_sub_tree(wd)
-                .expect("current WD incorrectly set, please switch to a valid WD!"),
+            None => {
+                res.dirtree
+                    .get_sub_tree(wd)
+                    .expect("current WD incorrectly set, please switch to a valid WD!");
+
+                wd
+            }
         };
 
         let deleted_files = api::fs_files::delete_files(
-            &config,
+            &ctx,
             &api::fs_files::DeleteFilesReqBody {
-                dir_id: &subtree.id,
+                dir_path: dirpath,
                 file_names: &self.filenames,
             },
         )
@@ -469,5 +526,100 @@ impl CliSubCmd for RmCommand {
             "{}",
             format!("Deleted {} files successfully!", deleted_files.len()).bold()
         )
+    }
+}
+
+impl CliSubCmd for UrlCommand {
+    async fn run(&self) {
+        let ctx = AppContext {
+            config: &CONFIG.try_lock().unwrap(),
+            state: &STATE.try_lock().unwrap(),
+        };
+        let wd = ctx.config.get_wd();
+
+        let abs_path = utils::dirtree::get_absolute_path(&self.path, wd);
+        let (dirpath, filename) = utils::dirtree::split_path(&abs_path);
+
+        let filters = vec![Filter(FilterCol::Name, FilterOp::Eq, json!(filename))];
+        let opts = GetFilesOpts::new(dirpath, Some(&filters));
+        let res_files = api::fs_files::get_files(&ctx, Some(opts))
+            .await
+            .expect("error fetching file!");
+
+        let file = res_files.files.first().expect("no file found!");
+
+        let access_token: Option<String> = match file.is_public {
+            true => None,
+            false => {
+                let perms: AccessTokenPermission = "r"
+                    .parse()
+                    .expect("error occured while generating permissions for access token!");
+                let acpl = vec![utils::tokens::get_acp(perms, &abs_path)];
+
+                let res_data = api::tokens::generate_access_token(
+                    &ctx,
+                    &acpl,
+                    &self.exp_input.get_expires_at(),
+                )
+                .await
+                .expect("error occured while generating access token!");
+
+                Some(res_data.access_token)
+            }
+        };
+
+        let share_url = files::get_share_url(access_token.as_deref(), &file.storage_id, &ctx)
+            .expect(&format!(
+                "error generating shareable url for specified path '{}'",
+                abs_path
+            ));
+        println!("{}", share_url.to_string().bold().cyan());
+
+        if let Some(token) = access_token {
+            let access_token: AccessToken = token.parse().expect("generate access token seems invalid! this SHOULD NOT HAPPEN!!! please report this bug.");
+
+            println!();
+            println!(
+                "{}",
+                format!(
+                    "expires_at: {}",
+                    access_token
+                        .expires_at
+                        .format(constants::LOCAL_DATETIME_FORMAT)
+                        .to_string()
+                        .magenta()
+                )
+                .dimmed()
+            );
+            println!(
+                "{}",
+                format!("acpl: {}", access_token.acpl.join(", ").blue()).dimmed()
+            );
+        }
+    }
+}
+
+impl CliSubCmd for MvCommand {
+    async fn run(&self) {
+        let ctx = AppContext {
+            config: &CONFIG.try_lock().unwrap(),
+            state: &STATE.try_lock().unwrap(),
+        };
+        let wd = ctx.config.get_wd();
+
+        let _ = api::dirtree::mv(
+            &ctx,
+            &MvOpts {
+                file_path: &utils::dirtree::get_absolute_path(&self.filepath, wd),
+                new_file_path: &utils::dirtree::get_absolute_path(&self.new_filepath, wd),
+            },
+        )
+        .await
+        .expect(&format!(
+            "error occured while moving file from '{}' to '{}'",
+            self.filepath, self.new_filepath
+        ));
+
+        println!("new file location: {}", self.new_filepath.bold());
     }
 }

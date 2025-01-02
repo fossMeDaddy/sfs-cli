@@ -1,17 +1,13 @@
-use clap::{Args, Parser, ValueEnum};
+use chrono::Duration;
+use clap::{Parser, ValueEnum};
 use colored::Colorize;
 
 use crate::{
-    api::{
-        dirtree::get_dirtree,
-        fs_files::{
-            get_files, set_file_metadata, Filter, FilterCol, FilterOp, GetFilesOpts, SetMetadata,
-        },
-    },
+    api::fs_files::{set_file_metadata, SetMetadata},
     config::CONFIG,
-    constants::{MIME_TYPES, UNKNOWN_MIME_TYPE},
-    shared_types::CliSubCmd,
-    utils::dirtree,
+    shared_types::{AppContext, CliSubCmd},
+    state::STATE,
+    utils::{dirtree, str2x},
 };
 
 #[derive(Parser)]
@@ -24,15 +20,16 @@ pub struct MetadataCommand {
     dirpath: Option<String>,
 
     #[arg(long)]
-    /// provide a new file type for example: "json", "jpeg", "pdf"
-    set_file_type: Option<String>,
-
-    #[arg(long)]
-    /// provide a new name to set the file
+    /// set a new name to set the file
     set_name: Option<String>,
 
     #[arg(long)]
+    /// make the file public or private
     visibility: Option<Visibility>,
+
+    #[arg(long, value_parser = str2x::str2duration)]
+    /// set the 'max-age' value for cache, defaults to 0 (format: 12d23h34m45s)
+    max_age: Option<Duration>,
 }
 
 #[derive(Clone, ValueEnum)]
@@ -43,60 +40,33 @@ pub enum Visibility {
 
 impl CliSubCmd for MetadataCommand {
     async fn run(&self) {
-        let config = CONFIG.try_lock().unwrap();
-
-        let wd = config.get_wd();
-
-        let filetype = match &self.set_file_type {
-            Some(file_type) => {
-                Some(*MIME_TYPES.get(file_type).expect("file type not supported please report to add this file type or leave blank to use 'application/octet-stream'"))
-            },
-            None => None
+        let ctx = AppContext {
+            config: &CONFIG.try_lock().unwrap(),
+            state: &STATE.try_lock().unwrap(),
         };
 
-        let res = get_dirtree(&config)
-            .await
-            .expect("error occured while fetching dirtree!");
+        let wd = ctx.config.get_wd();
 
-        let subtree = match &self.dirpath {
-            Some(dirpath) => {
-                let abs_path = dirtree::get_absolute_path(dirpath, wd);
-                res.dirtree
-                    .get_sub_tree(&abs_path)
-                    .expect("incorrect path given, corresponding directory cannot be found!")
-            }
-            None => res
-                .dirtree
-                .get_sub_tree(&wd)
-                .expect("incorrect working directory set, please change your working directory!"),
+        let dirpath = match &self.dirpath {
+            Some(dirpath) => dirtree::get_absolute_path(&dirpath, wd),
+            None => wd.to_string(),
         };
-
-        let filters = Some(vec![Filter(
-            FilterCol::Name,
-            FilterOp::Eq,
-            serde_json::json!(&self.filename),
-        )]);
-        let opts = GetFilesOpts::new(filters);
-        let res = get_files(&config, &subtree.id, Some(opts))
-            .await
-            .expect("error occured while fetching files!");
-
-        let fs_file = res
-            .files
-            .get(0)
-            .expect("error occured, no file found with provided name!");
+        let path = format!("{}/{}", dirpath, &self.filename);
 
         let metadata = SetMetadata {
+            path: &path,
             name: self.set_name.as_deref(),
-            storage_id: Some(&fs_file.storage_id),
-            file_type: filetype,
             is_public: match self.visibility {
                 Some(Visibility::Public) => Some(true),
                 Some(Visibility::Private) => Some(false),
                 None => None,
             },
+            cache_max_age_seconds: match self.max_age {
+                Some(max_age) => Some(max_age.num_seconds().abs() as u64),
+                None => None,
+            },
         };
-        set_file_metadata(&config, metadata)
+        set_file_metadata(&ctx, metadata)
             .await
             .expect("error occured while setting file metadata!");
 

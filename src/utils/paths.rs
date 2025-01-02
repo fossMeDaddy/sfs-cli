@@ -1,8 +1,10 @@
+use colored::Colorize;
 use regex::Regex;
 use std::env::current_dir;
 use std::io;
-use std::path::{absolute, Component, Path};
+use std::path::{absolute, Component, Path, MAIN_SEPARATOR};
 use std::path::{PathBuf, MAIN_SEPARATOR_STR};
+use terminal_size::terminal_size;
 use walkdir::WalkDir;
 
 pub fn expand_tilde<P: AsRef<Path>>(path: P) -> PathBuf {
@@ -109,7 +111,7 @@ pub fn get_paths_from_pattern(patt: &str) -> anyhow::Result<Vec<PathBuf>> {
 
     let patt = format!("^{}$", patt);
 
-    println!("REGEX: {}", patt);
+    println!("{}", format!("REGEX: {}", patt).dimmed());
     let patt_regex = Regex::new(patt.as_str())?;
 
     for entry in WalkDir::new(&ref_wd) {
@@ -123,4 +125,82 @@ pub fn get_paths_from_pattern(patt: &str) -> anyhow::Result<Vec<PathBuf>> {
 
     println!();
     Ok(paths)
+}
+
+pub fn get_file_name(name: &str, ext: Option<&str>) -> String {
+    let ext = match ext.as_ref() {
+        Some(ext) => ext.as_ref(),
+        None => "bin",
+    };
+
+    if name.contains(".") {
+        return name.to_string();
+    }
+
+    format!("{}.{}", name, ext)
+}
+
+/// returns ref path and pretty printed paths
+pub fn get_pretty_paths(paths: &Vec<PathBuf>) -> (String, String) {
+    let mut ref_wd: Option<&str> = None;
+
+    let mut max_col_size = 0;
+    for path in paths {
+        let path_str = match path.to_str() {
+            Some(path_str) => path_str,
+            None => continue,
+        };
+
+        max_col_size = max_col_size.max(path_str.len());
+
+        ref_wd = match ref_wd {
+            Some(ref_wd) => {
+                let mut common_i = 0;
+                for (ref_seg, path_seg) in ref_wd
+                    .split(MAIN_SEPARATOR)
+                    .zip(path_str.split(MAIN_SEPARATOR))
+                {
+                    if ref_seg != path_seg {
+                        break;
+                    }
+                    if ref_seg == "" {
+                        continue;
+                    };
+
+                    common_i += ref_seg.len() + 1;
+                }
+
+                Some(&ref_wd[..=common_i.min(ref_wd.len() - 1)])
+            }
+            None => Some(path_str),
+        };
+    }
+    let ref_wd = {
+        let ref_wd = ref_wd.unwrap_or("");
+        let last_i = ref_wd.len()
+            - ref_wd
+                .chars()
+                .rev()
+                .enumerate()
+                .find_map(|(i, c)| if c == MAIN_SEPARATOR { Some(i) } else { None })
+                .unwrap_or(0);
+
+        &ref_wd[..last_i]
+    };
+
+    let n_cols = match terminal_size() {
+        Some((w, _)) => {
+            ((w.0 as f32 / (max_col_size - ref_wd.len() + 2).max(2) as f32) as usize).max(2)
+        }
+        None => 2,
+    };
+
+    let str_iter = paths.iter().map(|path| {
+        path.to_string_lossy()
+            .trim_start_matches(ref_wd)
+            .to_string()
+    });
+    let output_str = super::term::get_formatted_cols(str_iter.into_iter(), n_cols);
+
+    (ref_wd.to_string(), output_str)
 }

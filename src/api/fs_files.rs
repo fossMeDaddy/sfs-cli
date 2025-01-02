@@ -4,8 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_with::skip_serializing_none;
 
 use crate::{
-    config::CliConfig,
-    shared_types::{ApiResponse, FsFile},
+    shared_types::{ApiResponse, AppContext, FsFile},
     utils::filters::parse_filter_str,
 };
 
@@ -80,17 +79,20 @@ pub struct Filter(pub FilterCol, pub FilterOp, pub serde_json::Value);
 
 #[derive(Serialize, Debug)]
 #[serde(rename_all = "camelCase")]
-pub struct GetFilesOpts {
-    pub filters: Option<Vec<Filter>>,
+pub struct GetFilesOpts<'a> {
+    pub dir_path: &'a str,
+    pub filters: Option<&'a Vec<Filter>>,
     pub limit: Option<usize>,
     pub page: Option<usize>,
     pub order_by: Option<OrderCol>,
     pub order: Option<Order>,
 }
 
-impl GetFilesOpts {
-    pub fn new(filters: Option<Vec<Filter>>) -> Self {
+impl<'a> GetFilesOpts<'a> {
+    /// takes in valid `dir_path`
+    pub fn new(dir_path: &'a str, filters: Option<&'a Vec<Filter>>) -> Self {
         Self {
+            dir_path,
             filters,
             page: None,
             limit: None,
@@ -109,13 +111,12 @@ pub struct GetFilesReqBody {
 }
 
 pub async fn get_files(
-    config: &CliConfig,
-    dir_id: &str,
-    opts: Option<GetFilesOpts>,
+    ctx: &AppContext<'_>,
+    opts: Option<GetFilesOpts<'_>>,
 ) -> anyhow::Result<GetFilesReqBody> {
-    let mut url = super::get_base_url(config)?;
+    let mut url = super::get_base_url(ctx)?;
 
-    url.set_path(&format!("fs/get-files/{}", dir_id));
+    url.set_path(&format!("fs/get-files"));
 
     let mut req = super::get_builder(reqwest::Method::POST, url)?;
     if let Some(opts) = opts {
@@ -151,16 +152,15 @@ pub async fn get_files(
 #[serde(rename_all = "camelCase")]
 pub struct PublicFileMetadata {
     pub is_encrypted: bool,
-    pub file_type: String,
     pub name: String,
 }
 
 pub async fn get_file_response(
-    config: &CliConfig,
+    ctx: &AppContext<'_>,
     storage_id: &str,
     token: Option<&str>,
 ) -> anyhow::Result<(PublicFileMetadata, Response)> {
-    let mut url = super::get_base_url(config)?;
+    let mut url = super::get_base_url(ctx)?;
 
     url.set_path(storage_id);
     if let Some(token) = token {
@@ -189,11 +189,11 @@ pub async fn get_file_response(
 }
 
 pub async fn get_file_metadata(
-    config: &CliConfig,
+    ctx: &AppContext<'_>,
     storage_id: &str,
     token: Option<&str>,
 ) -> anyhow::Result<PublicFileMetadata> {
-    let mut url = super::get_base_url(config)?;
+    let mut url = super::get_base_url(ctx)?;
 
     url.set_path(&format!("metadata/{}", storage_id));
     if let Some(token) = token {
@@ -230,17 +230,17 @@ pub async fn get_file_metadata(
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SetMetadata<'a> {
-    pub storage_id: Option<&'a str>,
+    pub path: &'a str,
     pub is_public: Option<bool>,
-    pub file_type: Option<&'a str>,
+    pub cache_max_age_seconds: Option<u64>,
     pub name: Option<&'a str>,
 }
 
 pub async fn set_file_metadata(
-    config: &CliConfig,
+    ctx: &AppContext<'_>,
     metadata: SetMetadata<'_>,
 ) -> anyhow::Result<()> {
-    let mut url = super::get_base_url(&config)?;
+    let mut url = super::get_base_url(&ctx)?;
     url.set_path("/blob/set-metadata");
 
     let res = super::get_builder(reqwest::Method::POST, url)?
@@ -264,15 +264,15 @@ pub async fn set_file_metadata(
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DeleteFilesReqBody<'a> {
-    pub dir_id: &'a str,
+    pub dir_path: &'a str,
     pub file_names: &'a Vec<String>,
 }
 
 pub async fn delete_files(
-    config: &CliConfig,
+    ctx: &AppContext<'_>,
     opts: &DeleteFilesReqBody<'_>,
 ) -> anyhow::Result<Vec<FsFile>> {
-    let mut url = super::get_base_url(config)?;
+    let mut url = super::get_base_url(ctx)?;
     url.set_path(&format!("/blob/delete"));
 
     let res = super::get_builder(reqwest::Method::POST, url)?

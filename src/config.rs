@@ -44,7 +44,7 @@ fn is_default<T: Default + PartialEq>(value: &T) -> bool {
 impl Default for CliConfig {
     fn default() -> Self {
         Self {
-            base_url: "https://dev.simplefs.io".to_string(),
+            base_url: "https://api.simplefs.io".to_string(),
             github_client_id: "Ov23li5rbT6pIfVXc7Rv".to_string(),
             working_directory: "/".to_string(),
             log_level: LogLevel::Chirpy,

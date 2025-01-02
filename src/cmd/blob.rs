@@ -3,27 +3,35 @@ use std::{
     io,
     os::unix::fs::MetadataExt,
     path::{PathBuf, MAIN_SEPARATOR},
+    str::FromStr,
 };
 
-use anyhow::anyhow;
+use chrono::Duration;
 use clap::Parser;
 use colored::*;
 use futures_util::StreamExt;
+use inquire::Confirm;
+use serde_json::json;
 use tokio::{fs, io::AsyncWriteExt};
 use url::Url;
 use zip::{write::SimpleFileOptions, CompressionMethod, ZipWriter};
 
 use crate::{
     api::{self, fs_files::*},
-    config::{CliConfig, LogLevel, CONFIG},
-    constants::{self, MIME_TYPES},
-    shared_types::{self, CliSubCmd, UploadSingleBlogMetadata},
+    config::{LogLevel, CONFIG},
+    constants::{self, MIME_TYPES, UNKNOWN_MIME_TYPE, ZIPFILE_MIME_TYPE},
+    shared_types::{
+        AccessTokenPermission, AppContext, CliSubCmd, FsFile, PermissionChar,
+        UploadSingleBlogMetadata,
+    },
+    state::STATE,
     utils::{
         chirpy_logs,
         crypto::{self, Decrypter},
-        dirtree, files,
+        dirtree,
+        files::{self, get_share_url},
         local_auth::LocalAuthData,
-        paths, tokens,
+        paths, str2x, tokens,
     },
 };
 
@@ -63,12 +71,20 @@ pub struct UploadBlobCommand {
     #[arg(long)]
     /// used in conjunction with 'share', provide custom expiry time for the share url. (e.g "AAdBBhCCmDDs", "7d30s", "2h30m12s", "30m" [default])
     share_exp: Option<String>,
+
+    #[arg(long, value_parser = str2x::str2duration)]
+    /// set the 'max-age' value for cache, defaults to 0 (format: 12d23h34m45s)
+    max_age: Option<Duration>,
+
+    #[arg(long)]
+    /// do not display confirm prompt when uploading multiple files matching with provided path pattern
+    no_confirm: bool,
 }
 
 #[derive(Parser)]
 pub struct GetBlobCommand {
     /// gimme anything, remote file path relative or absolute or a file url with/without embedded token
-    location_hints: Vec<String>,
+    location_hint: String,
 
     #[arg(short, long)]
     /// store the downloaded file at this path on your machine. can be relative. defaults to CWD
@@ -96,11 +112,42 @@ impl CliSubCmd for UploadBlobCommand {
             return;
         }
 
-        let config = CONFIG
-            .try_lock()
-            .expect("CONFIG lock connot be acquired, author skill issues...");
+        println!(
+            "{}",
+            format!("Files covered by pattern: {}", paths.len()).bold()
+        );
 
-        let wd = config.get_wd();
+        if paths.len() > 1 {
+            let (ref_wd, pretty_paths) = paths::get_pretty_paths(&paths);
+
+            println!();
+            if ref_wd.len() > 0 {
+                println!("{}", ref_wd.bold().dimmed());
+            }
+            println!("{}", pretty_paths.dimmed().blue());
+            println!();
+
+            if !self.no_confirm {
+                let confirm = Confirm::new(&format!(
+                    "{} files matched the pattern, confirm to upload",
+                    paths.len()
+                ))
+                .with_default(false)
+                .prompt()
+                .expect("error occured while displaying confirm prompt!");
+
+                if !confirm {
+                    println!("Aborted upload.");
+                    return;
+                }
+            }
+        }
+
+        let ctx = AppContext {
+            config: &CONFIG.try_lock().unwrap(),
+            state: &STATE.try_lock().unwrap(),
+        };
+        let wd = ctx.config.get_wd();
 
         let remote_dirpath = match &self.dirpath {
             Some(dirpath) => dirtree::get_absolute_path(dirpath, wd),
@@ -123,15 +170,11 @@ impl CliSubCmd for UploadBlobCommand {
         };
 
         let single_file_upload = paths.len() == 1;
-        let metadata_is_encrypted = password.is_some() && single_file_upload;
 
         let mut upload_filepath = paths[0].clone();
         if !single_file_upload {
             upload_filepath = self.get_zipfile_from_paths(&paths, password.as_deref());
         }
-
-        let mut url = api::get_base_url(&config)
-            .expect("error occured while generating a url to fetch from!");
 
         let mut upload_file = fs::File::open(&upload_filepath)
             .await
@@ -141,42 +184,42 @@ impl CliSubCmd for UploadBlobCommand {
             .await
             .expect("error occured while reading file metadata!");
 
-        let file_ext = upload_filepath
-            .to_str()
-            .unwrap_or("")
-            .split(".")
-            .last()
-            .unwrap_or("");
+        let file_ext = files::get_file_ext(
+            upload_filepath
+                .to_str()
+                .expect("invalid file path provided!"),
+        );
         let file_type = constants::MIME_TYPES
             .get(file_ext)
             .unwrap_or(&constants::UNKNOWN_MIME_TYPE);
 
-        let filename = match upload_filepath.file_stem() {
-            Some(filename) => Some(filename.to_string_lossy().to_string()),
-            None => None,
-        };
         let filename = match &self.name {
-            Some(name) => Some(name.clone()),
-            None => filename,
+            Some(name) => Some(name.to_string()),
+            None => match upload_filepath.file_stem() {
+                Some(filename) => Some(filename.to_string_lossy().to_string()),
+                None => None,
+            },
         };
 
         if metadata.size() < constants::MIN_MULTIPART_UPLOAD_SIZE as u64 {
-            url.set_path("/blob/upload");
-
             let upload_metadata = UploadSingleBlogMetadata {
                 name: filename.clone(),
                 is_public: self.public,
-                is_encrypted: metadata_is_encrypted,
+                is_encrypted: password.is_some(),
                 dir_path: remote_dirpath,
                 file_type: file_type.to_string(),
                 force_write: self.force,
+                cache_max_age_seconds: match self.max_age {
+                    Some(max_age) => Some(max_age.num_seconds().abs() as u64),
+                    None => None,
+                },
             };
 
             let fs_file = api::uploads::upload_file(
-                &config,
+                &ctx,
                 &upload_metadata,
                 &mut upload_file,
-                match metadata_is_encrypted {
+                match single_file_upload {
                     true => password.as_deref(),
                     false => None,
                 },
@@ -189,51 +232,53 @@ impl CliSubCmd for UploadBlobCommand {
                     "{}",
                     String::from("PLEASE ENSURE YOU REMEMBER/SAVE THIS PASSWORD!").bold()
                 );
-            }
 
-            match config.get_log_level() {
-                LogLevel::Chirpy => chirpy_logs::recalldeezai_product_placement(),
-                _ => {}
-            };
+                match ctx.config.get_log_level() {
+                    LogLevel::Chirpy => chirpy_logs::recalldeezai_product_placement(),
+                    _ => {}
+                };
+            }
 
             if !single_file_upload {
                 drop(upload_file);
                 _ = fs::remove_file(&upload_filepath).await;
             }
 
-            let auth_data = LocalAuthData::get().unwrap().unwrap();
+            let auth_data = LocalAuthData::get()
+                .expect("You're not logged in! please login before uploading files.");
 
             let share_url: String;
             if self.public {
-                share_url = files::get_share_url(None, &fs_file.storage_id, &config)
-                    .expect("error occured while generating share url!");
+                share_url = files::get_share_url(None, &fs_file.storage_id, &ctx)
+                    .expect("error occured while generating share url!")
+                    .to_string();
             } else if self.share {
-                let access_token_ttl = tokens::parse_validate_ttl(match &self.share_exp {
+                let access_token_ttl = str2x::str2duration(match &self.share_exp {
                     Some(exp) => exp.as_str(),
                     None => "30m",
                 })
                 .expect("invalid share expiry time provided!");
 
-                let acpl: Vec<String> = vec![tokens::get_acpl(
-                    shared_types::AccessTokenPermission::ReadPrivate,
+                let acpl: Vec<String> = vec![tokens::get_acp(
+                    AccessTokenPermission::from_str(&PermissionChar::Read.to_string())
+                        .expect("Error occured while parsing read access token permission"),
                     &format!("{}/{}", upload_metadata.dir_path, fs_file.name),
                 )];
                 let expires_at = chrono::Utc::now() + access_token_ttl;
 
-                let access_token = api::tokens::generate_access_token(&config, &acpl, expires_at)
+                let res_data = api::tokens::generate_access_token(&ctx, &acpl, &expires_at)
                     .await
                     .expect("error occured while generating access token!");
 
                 share_url =
-                    files::get_share_url(Some(&access_token.token), &fs_file.storage_id, &config)
-                        .expect("error occured while generating share url!");
+                    files::get_share_url(Some(&res_data.access_token), &fs_file.storage_id, &ctx)
+                        .expect("error occured while generating share url!")
+                        .to_string();
             } else {
-                share_url = files::get_share_url(
-                    Some(&auth_data.access_token.token),
-                    &fs_file.storage_id,
-                    &config,
-                )
-                .expect("error occured while generating share url!");
+                share_url =
+                    files::get_share_url(Some(&auth_data.access_token), &fs_file.storage_id, &ctx)
+                        .expect("error occured while generating share url!")
+                        .to_string();
 
                 println!(
                     "{}",
@@ -257,7 +302,7 @@ impl CliSubCmd for UploadBlobCommand {
                 "{}",
                 format!(
                     "Full path: {}",
-                    upload_metadata.dir_path + "/" + &fs_file.name
+                    dirtree::join_paths(vec![&upload_metadata.dir_path, &fs_file.name]),
                 )
                 .dimmed()
             );
@@ -348,196 +393,192 @@ impl UploadBlobCommand {
     }
 }
 
-async fn get_file_url_from_path(
-    config: &CliConfig,
-    dirtree: &shared_types::DirTree,
-    path_hint: &str,
-) -> anyhow::Result<Url> {
-    let abs_path = dirtree::get_absolute_path(path_hint, config.get_wd());
-    let (dirtree, filename) = match dirtree.split_path(&abs_path) {
-        Some(result) => {
-            let (dirtree, _) = result;
-            match result.1 {
-                Some(filename) => (dirtree, filename),
-                None => return Err(anyhow!("provided dir path is not a file!")),
-            }
-        }
-        None => return Err(anyhow::anyhow!("no matching valid path found!")),
-    };
-    let mut filename = filename.split('.').collect::<Vec<&str>>();
-    if filename.len() > 1 {
-        filename.pop();
-    }
-    let filename = filename.join(".");
-
-    let get_files_opts = GetFilesOpts {
-        filters: Some(vec![Filter(
-            FilterCol::Name,
-            FilterOp::Eq,
-            serde_json::json!(&filename),
-        )]),
-        limit: None,
-        page: None,
-        order_by: None,
-        order: None,
-    };
-
-    let result = get_files(config, &dirtree.id, Some(get_files_opts)).await?;
-    match result.files.first() {
-        Some(file) => {
-            let mut url = api::get_base_url(config)?;
-            url.set_path(&file.storage_id);
-
-            Ok(url)
-        }
-        None => Err(anyhow::anyhow!("file not found!")),
-    }
-}
-
 impl CliSubCmd for GetBlobCommand {
     async fn run(&self) {
-        let config = CONFIG.try_lock().unwrap();
+        let ctx = AppContext {
+            config: &CONFIG.try_lock().unwrap(),
+            state: &STATE.try_lock().unwrap(),
+        };
 
-        for location_hint in &self.location_hints {
-            let url = match Url::parse(location_hint) {
-                Ok(url) => url,
-                Err(_err) => {
-                    let res = api::dirtree::get_dirtree(&config)
-                        .await
-                        .expect("error occured while fetching your dirtree!");
+        let wd = ctx.config.get_wd();
 
-                    get_file_url_from_path(&config, &res.dirtree, &location_hint)
-                        .await
-                        .expect("error occured while fetching file from given path!")
-                }
-            };
+        let (url, file): (Url, Option<FsFile>) = match Url::parse(&self.location_hint) {
+            Ok(url) => (url, None),
+            Err(_err) => {
+                let active_token = ctx.state
+                    .get_active_token()
+                    .expect("provided access token seems invalid!")
+                    .expect("access token not found! please ensure you're logged in or have added an access token.");
 
-            let storage_id = url.path().trim_matches('/');
-            let access_token = match url.query_pairs().find(|(q, _)| q.to_string() == "token") {
-                Some((_, token)) => Some(token.to_string()),
-                None => None,
-            };
+                let abs_path = dirtree::get_absolute_path(&self.location_hint, wd);
+                let (dirpath, filename) = dirtree::split_path(&abs_path);
 
-            let metadata = get_file_metadata(&config, storage_id, access_token.as_deref())
-                .await
-                .expect("error occured while fetching metadata for file!");
+                let filters = vec![Filter(FilterCol::Name, FilterOp::Eq, json!(filename))];
+                let opts = GetFilesOpts::new(dirpath, Some(&filters));
+                let mut res_files = api::fs_files::get_files(&ctx, Some(opts))
+                    .await
+                    .expect("error occured while fetching file from given path!");
 
-            let file_ext =
-                MIME_TYPES
-                    .entries()
-                    .find_map(|(k, v)| match **v == metadata.file_type {
-                        true => Some(k.to_string()),
-                        false => None,
-                    });
-            let filepath = match &self.output {
-                None => current_dir()
-                    .expect("CWD NOT FOUND WTF?")
-                    .join(metadata.name),
-                Some(path) => {
-                    let mut abs_path = paths::get_absolute_path(path)
-                        .expect("provided output path seems invalid!");
+                let file = res_files
+                    .files
+                    .pop()
+                    .expect("no file found in the given path!");
 
-                    if abs_path.file_stem().is_some() {
-                        abs_path = abs_path.join(metadata.name);
+                match get_share_url(Some(&active_token.0), &file.storage_id, &ctx) {
+                    Ok(url) => (url, Some(file)),
+                    Err(_) => {
+                        println!("unexpected error occured while generating url!");
+
+                        println!("access token has been generated:");
+                        println!("{}", active_token.0.bold().cyan());
+                        println!();
+                        println!(
+                            "{}",
+                            format!(
+                                "expires_at: {}",
+                                active_token
+                                    .1
+                                    .expires_at
+                                    .format(constants::LOCAL_DATETIME_FORMAT)
+                                    .to_string()
+                                    .magenta()
+                            )
+                            .dimmed()
+                        );
+                        println!(
+                            "{}",
+                            format!("acpl: {}", active_token.1.acpl.join(", ").blue()).dimmed()
+                        );
+                        return;
                     }
-
-                    abs_path
                 }
             }
-            .with_extension(match file_ext {
-                Some(file_ext) => file_ext.to_string(),
-                None => String::new(),
-            });
+        };
 
-            let mut file_opts = fs::File::options();
-            file_opts.append(true).create_new(true);
+        let storage_id = url.path().trim_matches('/');
+        let access_token = match url.query_pairs().find(|(q, _)| q.to_string() == "token") {
+            Some((_, token)) => Some(token.to_string()),
+            None => None,
+        };
 
-            let mut file = file_opts
-                .open(&filepath)
+        let metadata = match file {
+            Some(file) => PublicFileMetadata {
+                name: file.name,
+                is_encrypted: file.is_encrypted,
+            },
+            None => get_file_metadata(&ctx, storage_id, access_token.as_deref())
                 .await
-                .expect("error occured while opening file in append mode!");
+                .expect("error occured while fetching metadata for file!"),
+        };
 
-            let mut password: Option<String> = None;
-            if metadata.is_encrypted {
-                if let Ok(pwd) = var("PASSWORD") {
-                    password = Some(pwd);
-                } else {
-                    password = Some(
-                        dialoguer::Password::new()
-                            .with_prompt("File is encrypted, please enter a password:")
-                            .interact()
-                            .unwrap(),
+        let filepath = match &self.output {
+            None => current_dir()
+                .expect("CWD NOT FOUND WTF?")
+                .join(&metadata.name),
+            Some(path) => {
+                let mut abs_path =
+                    paths::get_absolute_path(path).expect("provided output path seems invalid!");
+
+                if !abs_path.is_file() {
+                    abs_path = abs_path.join(&metadata.name);
+                }
+
+                abs_path
+            }
+        };
+
+        let mut file_opts = fs::File::options();
+        file_opts.append(true).create_new(true);
+
+        let mut file = file_opts
+            .open(&filepath)
+            .await
+            .expect("error occured while opening file in append mode!");
+
+        let is_zip = MIME_TYPES
+            .get(files::get_file_ext(&metadata.name))
+            .unwrap_or(&UNKNOWN_MIME_TYPE)
+            == &ZIPFILE_MIME_TYPE;
+        let should_decrypt = metadata.is_encrypted && !is_zip;
+        let mut password: Option<String> = None;
+        if should_decrypt {
+            if let Ok(pwd) = var("PASSWORD") {
+                password = Some(pwd);
+            } else {
+                password = Some(
+                    dialoguer::Password::new()
+                        .with_prompt("File is encrypted, please enter a password:")
+                        .interact()
+                        .unwrap(),
+                );
+            }
+        }
+
+        let (_, res) = get_file_response(&ctx, storage_id, access_token.as_deref())
+            .await
+            .expect("error occured while fetching file!");
+
+        let mut stream = res.bytes_stream();
+        let mut _first = true;
+        let mut decrypter: Option<Decrypter> = None;
+        while let Some(Ok(data)) = stream.next().await {
+            let data = data.to_vec();
+            let mut data_read_buf = data.as_slice();
+
+            if should_decrypt {
+                if _first {
+                    if data_read_buf.len() < crypto::HEADER_LENGTH {
+                        println!(
+                            "{}",
+                            "File is encrypted with invalid encryption, cannot be retreived!".red()
+                        );
+                        return;
+                    }
+
+                    let cipher_header: [u8; crypto::HEADER_LENGTH] = data_read_buf
+                        [0..crypto::HEADER_LENGTH]
+                        .try_into()
+                        .expect("error occured while getting encryption header!");
+                    data_read_buf = &data_read_buf[crypto::HEADER_LENGTH..];
+
+                    decrypter = Some(
+                        Decrypter::new(password.as_deref().unwrap(), cipher_header)
+                            .expect("error occured while generating decrypter!"),
+                    );
+
+                    _first = false;
+                }
+
+                let decrypter = decrypter.as_ref().unwrap();
+
+                let plaintext = decrypter
+                    .decrypt(&data_read_buf)
+                    .expect("Decryption error occured! Please check your password.");
+
+                let b_write = file
+                    .write(&plaintext)
+                    .await
+                    .expect("file incorrectly written, error occured while writing.");
+                if b_write < plaintext.len() {
+                    println!(
+                        "WARNING: only {} of {} bytes written in {}",
+                        b_write,
+                        plaintext.len(),
+                        filepath.to_str().unwrap()
                     );
                 }
-            }
-
-            let (metadata, res) = get_file_response(&config, storage_id, access_token.as_deref())
-                .await
-                .expect("error occured while fetching file!");
-
-            let mut stream = res.bytes_stream();
-            let mut _first = true;
-            let mut decrypter: Option<Decrypter> = None;
-            while let Some(Ok(data)) = stream.next().await {
-                let data = data.to_vec();
-                let mut data_read_buf = data.as_slice();
-
-                if metadata.is_encrypted {
-                    if _first {
-                        if data_read_buf.len() < crypto::HEADER_LENGTH {
-                            println!(
-                                "{}",
-                                "File is encrypted with invalid encryption, cannot be retreived!"
-                                    .red()
-                            );
-                            return;
-                        }
-
-                        let cipher_header: [u8; crypto::HEADER_LENGTH] = data_read_buf
-                            [0..crypto::HEADER_LENGTH]
-                            .try_into()
-                            .expect("error occured while getting encryption header!");
-                        data_read_buf = &data_read_buf[crypto::HEADER_LENGTH..];
-
-                        decrypter = Some(
-                            Decrypter::new(password.as_deref().unwrap(), cipher_header)
-                                .expect("error occured while generating decrypter!"),
-                        );
-
-                        _first = false;
-                    }
-
-                    let decrypter = decrypter.as_ref().unwrap();
-
-                    let plaintext = decrypter
-                        .decrypt(&data_read_buf)
-                        .expect("Decryption error occured! Please check your password.");
-
-                    let b_write = file
-                        .write(&plaintext)
-                        .await
-                        .expect("file incorrectly written, error occured while writing.");
-                    if b_write < plaintext.len() {
-                        println!(
-                            "WARNING: only {} of {} bytes written in {}",
-                            b_write,
-                            plaintext.len(),
-                            filepath.to_str().unwrap()
-                        );
-                    }
-                } else {
-                    let b_write = file
-                        .write(&data_read_buf)
-                        .await
-                        .expect("file incorrectly written, error occured while writing.");
-                    if b_write < data_read_buf.len() {
-                        println!(
-                            "WARNING: only {} of {} bytes written in {}",
-                            b_write,
-                            data_read_buf.len(),
-                            filepath.to_str().unwrap()
-                        );
-                    }
+            } else {
+                let b_write = file
+                    .write(&data_read_buf)
+                    .await
+                    .expect("file incorrectly written, error occured while writing.");
+                if b_write < data_read_buf.len() {
+                    println!(
+                        "WARNING: only {} of {} bytes written in {}",
+                        b_write,
+                        data_read_buf.len(),
+                        filepath.to_str().unwrap()
+                    );
                 }
             }
         }

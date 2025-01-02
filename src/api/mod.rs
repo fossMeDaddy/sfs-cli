@@ -1,19 +1,24 @@
+use anyhow::anyhow;
 use base64::prelude::*;
 use url::Url;
 
-use crate::{config::CliConfig, utils::local_auth::LocalAuthData};
+use crate::{
+    shared_types::AppContext,
+    state::{ActiveToken, STATE},
+    utils::local_auth::LocalAuthData,
+};
 
+pub mod auth;
 pub mod dirtree;
 pub mod fs_files;
 pub mod tokens;
 pub mod uploads;
+pub mod usage;
 
-pub fn get_base_url(config: &CliConfig) -> anyhow::Result<Url> {
-    let mut url = Url::parse(config.get_base_url())?;
-    if let Some(auth_data) = LocalAuthData::get()? {
-        url.set_query(Some(
-            format!("token={}", auth_data.access_token.token).as_str(),
-        ));
+pub fn get_base_url(ctx: &AppContext) -> anyhow::Result<Url> {
+    let mut url = Url::parse(ctx.config.get_base_url())?;
+    if let Some((access_token, _)) = ctx.state.get_active_token()? {
+        url.set_query(Some(format!("token={}", access_token).as_str()));
     }
 
     Ok(url)
@@ -25,15 +30,19 @@ pub fn get_builder(method: reqwest::Method, url: Url) -> anyhow::Result<reqwest:
 }
 
 pub fn get_sudo_builder(
+    ctx: &AppContext<'_>,
     method: reqwest::Method,
     url: Url,
 ) -> anyhow::Result<reqwest::RequestBuilder> {
     let client = reqwest::Client::new();
 
-    let auth_data = match LocalAuthData::get()? {
-        Some(data) => data,
-        None => return Err(anyhow::anyhow!("Please login first!")),
+    match ctx.state.active_token {
+        ActiveToken::RootAccessToken => {}
+        _ => return Err(anyhow!("only FileSystem owners are allowed to perform this action! either switch to your access token or ask the owner to perform this action for you."))
     };
+
+    let auth_data =
+        LocalAuthData::get().ok_or(anyhow!("Authentication not done! please login."))?;
 
     let api_creds = BASE64_STANDARD.encode(format!(
         "{}:{}",

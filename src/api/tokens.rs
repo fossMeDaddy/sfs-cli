@@ -1,19 +1,27 @@
+use anyhow::anyhow;
 use chrono::{DateTime, SecondsFormat, Utc};
-use serde::Serialize;
-use url::Url;
+use serde::{Deserialize, Serialize};
 
 use crate::{
     api::get_sudo_builder,
-    config::CliConfig,
-    shared_types::{AccessToken, ApiResponse},
+    shared_types::{ApiResponse, AppContext, DirTree},
 };
 
+use super::get_base_url;
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GenAccessTokenRes {
+    pub access_token: String,
+    pub dirtree: DirTree,
+}
+
 pub async fn generate_access_token(
-    config: &CliConfig,
+    ctx: &AppContext<'_>,
     acpl: &Vec<String>,
-    expires_at: DateTime<Utc>,
-) -> anyhow::Result<AccessToken> {
-    let mut url = Url::parse(config.get_base_url())?;
+    expires_at: &DateTime<Utc>,
+) -> anyhow::Result<GenAccessTokenRes> {
+    let mut url = super::get_base_url(ctx)?;
     url.set_path("access/generate-token");
 
     #[derive(Serialize)]
@@ -23,7 +31,7 @@ pub async fn generate_access_token(
         expires_at: String,
     }
 
-    let res = get_sudo_builder(reqwest::Method::POST, url)?
+    let res = get_sudo_builder(ctx, reqwest::Method::POST, url)?
         .json(&Req {
             acpl: acpl.clone(),
             expires_at: expires_at
@@ -41,9 +49,34 @@ pub async fn generate_access_token(
         ));
     }
 
-    let res_data: ApiResponse<AccessToken> = res.json().await?;
+    let res_data: ApiResponse<GenAccessTokenRes> = res.json().await?;
     match res_data.data {
         Some(data) => Ok(data),
-        None => Err(anyhow::anyhow!("Response data is null!")),
+        None => Err(anyhow::anyhow!(
+            "Response data is null! {}",
+            serde_json::to_string_pretty(&res_data)?
+        )),
     }
+}
+
+pub async fn blacklist_token(ctx: &AppContext<'_>, tokens: &Vec<String>) -> anyhow::Result<()> {
+    let mut url = get_base_url(ctx)?;
+    url.set_path("/access/blacklist-token");
+
+    #[derive(Serialize)]
+    struct ReqBody<'a> {
+        tokens: &'a Vec<String>,
+    }
+
+    let res = get_sudo_builder(ctx, reqwest::Method::POST, url)?
+        .json(&ReqBody { tokens })
+        .send()
+        .await?;
+    let status = res.status();
+    if !status.is_success() {
+        let res_text = res.text().await?;
+        return Err(anyhow!("API error occured: {status}\n{res_text}"));
+    }
+
+    Ok(())
 }

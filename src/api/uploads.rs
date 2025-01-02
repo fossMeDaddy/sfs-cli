@@ -3,21 +3,20 @@ use reqwest::multipart;
 use tokio::{fs, io::AsyncReadExt};
 
 use crate::{
-    config::CliConfig,
     constants,
-    shared_types::{ApiResponse, FsFile, UploadSingleBlogMetadata},
+    shared_types::{ApiResponse, AppContext, FsFile, UploadSingleBlogMetadata},
     utils::crypto::Encrypter,
 };
 
 use super::{get_base_url, get_builder};
 
 pub async fn upload_file(
-    config: &CliConfig,
+    ctx: &AppContext<'_>,
     upload_metadata: &UploadSingleBlogMetadata,
     upload_file: &mut fs::File,
     password: Option<&str>,
 ) -> anyhow::Result<FsFile> {
-    let mut url = get_base_url(config)?;
+    let mut url = get_base_url(ctx)?;
     url.set_path("/blob/upload");
 
     let upload_metadata_str = serde_json::to_vec(&upload_metadata)?;

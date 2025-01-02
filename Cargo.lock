@@ -1436,6 +1436,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "nucleo-matcher"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bf33f538733d1a5a3494b836ba913207f14d9d4a1d3cd67030c5061bdd2cac85"
+dependencies = [
+ "memchr",
+ "unicode-segmentation",
+]
+
+[[package]]
 name = "num"
 version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2093,6 +2103,7 @@ dependencies = [
  "futures-util",
  "inquire",
  "keyring",
+ "nucleo-matcher",
  "once_cell",
  "pbkdf2",
  "phf",
@@ -2103,6 +2114,7 @@ dependencies = [
  "serde_json",
  "serde_with",
  "sha2",
+ "terminal_size",
  "tiny_http",
  "tokio",
  "toml",
@@ -2298,6 +2310,16 @@ dependencies = [
  "cfg-if",
  "fastrand",
  "once_cell",
+ "rustix",
+ "windows-sys 0.59.0",
+]
+
+[[package]]
+name = "terminal_size"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5352447f921fda68cf61b4101566c0bdb5104eff6804d0678e5227580ab6a4e9"
+dependencies = [
  "rustix",
  "windows-sys 0.59.0",
 ]

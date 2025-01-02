@@ -1,8 +1,15 @@
 use phf::phf_map;
 
+pub const UNTITLED_TAG_PREFX: &str = "untitled_";
+
+pub const ROOT_ACCESS_TOKEN_TAG: &str = "login";
+
+pub const LOCAL_DATETIME_FORMAT: &str = "%Y-%m-%d %H:%M:%S";
+
 pub const MIN_MULTIPART_UPLOAD_SIZE: i32 = 25 * 1024 * 1024;
 
-pub static UNKNOWN_MIME_TYPE: &'static str = "application/octet-stream";
+pub const UNKNOWN_MIME_TYPE: &str = "application/octet-stream";
+pub const ZIPFILE_MIME_TYPE: &str = "application/zip";
 pub static MIME_TYPES: phf::Map<&'static str, &'static str> = phf_map! {
     "aac" => "audio/aac",
     "abw" => "application/x-abiword",
@@ -10,7 +17,7 @@ pub static MIME_TYPES: phf::Map<&'static str, &'static str> = phf_map! {
     "avif" => "image/avif",
     "avi" => "video/x-msvideo",
     "azw" => "application/vnd.amazon.ebook",
-    "bin" => "application/octet-stream",
+    "bin" => UNKNOWN_MIME_TYPE,
     "bmp" => "image/bmp",
     "bz" => "application/x-bzip",
     "bz2" => "application/x-bzip2",
@@ -77,7 +84,7 @@ pub static MIME_TYPES: phf::Map<&'static str, &'static str> = phf_map! {
     "xlsx" => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     "xml" => "application/xml",
     "xul" => "application/vnd.mozilla.xul+xml",
-    "zip" => "application/zip",
+    "zip" => ZIPFILE_MIME_TYPE,
     "3gp" => "video/3gpp",
     "3g2" => "video/3gpp2",
     "7z" => "application/x-7z-compressed",
