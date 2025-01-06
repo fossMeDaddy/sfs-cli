@@ -31,9 +31,6 @@ pub struct CliConfig {
     github_client_id: String,
 
     #[serde(skip_serializing_if = "is_default")]
-    working_directory: String,
-
-    #[serde(skip_serializing_if = "is_default")]
     log_level: LogLevel,
 }
 
@@ -46,7 +43,6 @@ impl Default for CliConfig {
         Self {
             base_url: "https://api.simplefs.io".to_string(),
             github_client_id: "Ov23li5rbT6pIfVXc7Rv".to_string(),
-            working_directory: "/".to_string(),
             log_level: LogLevel::Chirpy,
         }
     }
@@ -79,22 +75,6 @@ impl CliConfig {
 
     pub fn get_base_url(&self) -> &str {
         self.base_url.as_str()
-    }
-
-    pub fn get_wd(&self) -> &str {
-        self.working_directory.as_str()
-    }
-
-    pub fn set_wd(&mut self, wd: &str) -> anyhow::Result<()> {
-        self.working_directory = if wd != "/" {
-            wd.trim_end_matches("/").to_string()
-        } else {
-            wd.to_string()
-        };
-
-        self.save_to_file()?;
-
-        Ok(())
     }
 
     pub fn get_log_level(&self) -> LogLevel {

@@ -45,7 +45,7 @@ impl CliSubCmd for MetadataCommand {
             state: &STATE.try_lock().unwrap(),
         };
 
-        let wd = ctx.config.get_wd();
+        let wd = ctx.state.get_wd();
 
         let dirpath = match &self.dirpath {
             Some(dirpath) => dirtree::get_absolute_path(&dirpath, wd),

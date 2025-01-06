@@ -1,3 +1,4 @@
+use chrono::Duration;
 use clap::Parser;
 use colored::Colorize;
 use serde::Serialize;
@@ -15,7 +16,7 @@ use crate::{
         AccessToken, AccessTokenPermission, ApiResponse, AppContext, CliSubCmd, DirTree,
     },
     state::STATE,
-    utils::{self, files},
+    utils::{self, files, x2str},
 };
 
 use super::tokens::ExpInput;
@@ -145,7 +146,7 @@ impl CliSubCmd for TreeCommand {
             config: &CONFIG.try_lock().unwrap(),
             state: &STATE.try_lock().unwrap(),
         };
-        let wd = ctx.config.get_wd();
+        let wd = ctx.state.get_wd();
 
         let res = api::dirtree::get_dirtree(&ctx)
             .await
@@ -188,7 +189,7 @@ impl CliSubCmd for MkdirCommand {
         let mut url = api::get_base_url(&ctx).expect("invalid url!");
         url.set_path("fs/mkdir");
 
-        let wd = ctx.config.get_wd();
+        let wd = ctx.state.get_wd();
 
         let dirpath = match &self.dirpath {
             Some(dirpath) => &utils::dirtree::get_absolute_path(&dirpath, wd),
@@ -235,7 +236,7 @@ impl CliSubCmd for RmdirCommand {
         let mut url = api::get_base_url(&ctx).expect("config issue, cannot fetch base url");
         url.set_path("fs/rmdir");
 
-        let wd = ctx.config.get_wd();
+        let wd = ctx.state.get_wd();
 
         let req = Req {
             path: &utils::dirtree::get_absolute_path(&self.dirpath, wd),
@@ -277,7 +278,7 @@ impl CliSubCmd for MvdirCommand {
         let mut url = api::get_base_url(&ctx).expect("config issue, cannot fetch base url");
         url.set_path("fs/mvdir");
 
-        let wd = ctx.config.get_wd();
+        let wd = ctx.state.get_wd();
 
         #[derive(Serialize)]
         #[serde(rename_all = "camelCase")]
@@ -310,15 +311,17 @@ impl CliSubCmd for MvdirCommand {
 
 impl CliSubCmd for Cd {
     async fn run(&self) {
+        let mut state_mut = STATE.try_lock().unwrap();
         let ctx = AppContext {
             config: &CONFIG.try_lock().unwrap(),
-            state: &STATE.try_lock().unwrap(),
+            state: &state_mut,
         };
+
         let res = api::dirtree::get_dirtree(&ctx)
             .await
             .expect("Unexpected error occured while fetching dirtree!");
 
-        let wd = ctx.config.get_wd();
+        let wd = ctx.state.get_wd();
 
         let dirpath = &utils::dirtree::get_absolute_path(&self.dirpath, wd);
         let sub_dirtree = res.dirtree.get_sub_tree(dirpath);
@@ -329,8 +332,7 @@ impl CliSubCmd for Cd {
 
         drop(ctx);
 
-        let mut config_mut = CONFIG.try_lock().unwrap();
-        config_mut
+        state_mut
             .set_wd(&dirpath)
             .expect("Error occured while setting a working directory!");
     }
@@ -338,11 +340,22 @@ impl CliSubCmd for Cd {
 
 impl CliSubCmd for PwdCommand {
     async fn run(&self) {
-        let config = CONFIG.try_lock().expect(
+        let state = STATE.try_lock().expect(
             "failed to acquire lock over config, THIS SHOULD NOT HAPPEN, PLEASE REPORT BUG!!",
         );
 
-        println!("{}", config.get_wd());
+        println!("{}", state.get_wd());
+    }
+}
+
+impl LsCommand {
+    fn get_file_cache_duration_str(secs: u64) -> String {
+        match Duration::new(secs as i64, 0) {
+            Some(d) => {
+                format!("CacheTTL={}", x2str::duration2str(d))
+            }
+            None => String::from("INVALID_DURATION"),
+        }
     }
 }
 
@@ -352,7 +365,7 @@ impl CliSubCmd for LsCommand {
             config: &CONFIG.try_lock().unwrap(),
             state: &STATE.try_lock().unwrap(),
         };
-        let wd = ctx.config.get_wd();
+        let wd = ctx.state.get_wd();
 
         let page = self.page.unwrap_or(1);
 
@@ -425,11 +438,14 @@ impl CliSubCmd for LsCommand {
         let mut pretty_file_sizes: Vec<String> = vec![];
         let mut file_type_padding = 0;
         let mut file_size_padding = 0;
+        let mut file_cache_age_padding = 0;
         res.files.iter().for_each(|f| {
             let pretty_file_size = utils::files::get_pretty_size(f.file_size);
 
             file_type_padding = file_type_padding.max(f.get_filetype().len());
             file_size_padding = file_size_padding.max(pretty_file_size.len());
+            file_cache_age_padding = file_cache_age_padding
+                .max(Self::get_file_cache_duration_str(f.cache_max_age_seconds).len());
 
             pretty_file_sizes.push(pretty_file_size);
         });
@@ -445,16 +461,27 @@ impl CliSubCmd for LsCommand {
                 false => "",
             };
 
+            let cache_ttl_str =
+                Self::get_file_cache_duration_str(file.cache_max_age_seconds).dimmed();
+            print!(
+                "{0:<1$} ",
+                if file.cache_max_age_seconds == 0 {
+                    cache_ttl_str.red()
+                } else {
+                    cache_ttl_str
+                },
+                file_cache_age_padding
+            );
             print!(
                 "{} ",
-                file.created_at
+                file.updated_at
                     .format(constants::LOCAL_DATETIME_FORMAT)
                     .to_string()
                     .dimmed()
                     .magenta()
             );
             print!("{0:>1$} ", pretty_file_size.bold(), file_size_padding);
-            print!("{0:>1$} ", file.get_filetype().dimmed(), file_type_padding);
+            print!("{0:>1$} ", file.get_filetype(), file_type_padding);
             print!("{} ", file.name.bold().cyan());
             print!("{} ", emo_tags);
             println!();
@@ -488,7 +515,7 @@ impl CliSubCmd for RmCommand {
             config: &CONFIG.try_lock().unwrap(),
             state: &STATE.try_lock().unwrap(),
         };
-        let wd = ctx.config.get_wd();
+        let wd = ctx.state.get_wd();
 
         let res = api::dirtree::get_dirtree(&ctx)
             .await
@@ -535,7 +562,7 @@ impl CliSubCmd for UrlCommand {
             config: &CONFIG.try_lock().unwrap(),
             state: &STATE.try_lock().unwrap(),
         };
-        let wd = ctx.config.get_wd();
+        let wd = ctx.state.get_wd();
 
         let abs_path = utils::dirtree::get_absolute_path(&self.path, wd);
         let (dirpath, filename) = utils::dirtree::split_path(&abs_path);
@@ -605,7 +632,7 @@ impl CliSubCmd for MvCommand {
             config: &CONFIG.try_lock().unwrap(),
             state: &STATE.try_lock().unwrap(),
         };
-        let wd = ctx.config.get_wd();
+        let wd = ctx.state.get_wd();
 
         let _ = api::dirtree::mv(
             &ctx,

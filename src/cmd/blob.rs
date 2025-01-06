@@ -117,6 +117,18 @@ impl CliSubCmd for UploadBlobCommand {
             format!("Files covered by pattern: {}", paths.len()).bold()
         );
 
+        let ctx = AppContext {
+            config: &CONFIG.try_lock().unwrap(),
+            state: &STATE.try_lock().unwrap(),
+        };
+        let wd = ctx.state.get_wd();
+
+        let remote_dirpath = match &self.dirpath {
+            Some(dirpath) => dirtree::get_absolute_path(dirpath, wd),
+            None => wd.to_string(),
+        }
+        .to_string();
+
         if paths.len() > 1 {
             let (ref_wd, pretty_paths) = paths::get_pretty_paths(&paths);
 
@@ -129,8 +141,9 @@ impl CliSubCmd for UploadBlobCommand {
 
             if !self.no_confirm {
                 let confirm = Confirm::new(&format!(
-                    "{} files matched the pattern, confirm to upload",
-                    paths.len()
+                    "{} files matched the pattern, confirm to upload at {}",
+                    paths.len(),
+                    remote_dirpath.bold()
                 ))
                 .with_default(false)
                 .prompt()
@@ -142,18 +155,6 @@ impl CliSubCmd for UploadBlobCommand {
                 }
             }
         }
-
-        let ctx = AppContext {
-            config: &CONFIG.try_lock().unwrap(),
-            state: &STATE.try_lock().unwrap(),
-        };
-        let wd = ctx.config.get_wd();
-
-        let remote_dirpath = match &self.dirpath {
-            Some(dirpath) => dirtree::get_absolute_path(dirpath, wd),
-            None => wd.to_string(),
-        }
-        .to_string();
 
         let password: Option<String> = match var("PASSWORD") {
             Ok(pwd) => Some(pwd),
@@ -400,7 +401,7 @@ impl CliSubCmd for GetBlobCommand {
             state: &STATE.try_lock().unwrap(),
         };
 
-        let wd = ctx.config.get_wd();
+        let wd = ctx.state.get_wd();
 
         let (url, file): (Url, Option<FsFile>) = match Url::parse(&self.location_hint) {
             Ok(url) => (url, None),

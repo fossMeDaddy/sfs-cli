@@ -100,12 +100,12 @@ pub fn get_paths_from_pattern(patt: &str) -> anyhow::Result<Vec<PathBuf>> {
         .replace("**", r".+")
         .replace("*", format!(r"[^\{}]*", MAIN_SEPARATOR_STR).as_str());
 
-    let re = Regex::new(r"\{([^}]*)\}").unwrap();
+    let re = Regex::new(r"\{([\w\.\|]+)\}").unwrap();
     let patt = re
         .replace_all(patt.as_str(), |caps: &regex::Captures| {
             let cap = &caps[1];
 
-            format!("({})", cap.replace(",", "|"))
+            format!("({cap})")
         })
         .to_string();
 
@@ -125,19 +125,6 @@ pub fn get_paths_from_pattern(patt: &str) -> anyhow::Result<Vec<PathBuf>> {
 
     println!();
     Ok(paths)
-}
-
-pub fn get_file_name(name: &str, ext: Option<&str>) -> String {
-    let ext = match ext.as_ref() {
-        Some(ext) => ext.as_ref(),
-        None => "bin",
-    };
-
-    if name.contains(".") {
-        return name.to_string();
-    }
-
-    format!("{}.{}", name, ext)
 }
 
 /// returns ref path and pretty printed paths
@@ -190,9 +177,9 @@ pub fn get_pretty_paths(paths: &Vec<PathBuf>) -> (String, String) {
 
     let n_cols = match terminal_size() {
         Some((w, _)) => {
-            ((w.0 as f32 / (max_col_size - ref_wd.len() + 2).max(2) as f32) as usize).max(2)
+            ((w.0 as f32 / (max_col_size - ref_wd.len() + 2).max(2) as f32) as usize).max(1)
         }
-        None => 2,
+        None => 1,
     };
 
     let str_iter = paths.iter().map(|path| {

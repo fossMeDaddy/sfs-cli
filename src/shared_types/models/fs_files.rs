@@ -15,6 +15,7 @@ pub struct FsFile {
     pub is_encrypted: bool,
     pub is_public: bool,
     pub created_at: DateTime<Local>,
+    pub updated_at: DateTime<Local>,
     pub deleted_at: Option<DateTime<Local>>,
 }
 

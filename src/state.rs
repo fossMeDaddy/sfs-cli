@@ -15,7 +15,7 @@ use crate::{
     utils::{local_auth::LocalAuthData, paths::get_absolute_path},
 };
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ActiveToken {
     RootAccessToken,
     Tag(String),
@@ -39,6 +39,7 @@ pub struct PersistentState {
     /// (tag, token)
     pub tokens: HashMap<String, String>,
     pub active_token: ActiveToken,
+    pub working_directory: String,
 }
 
 impl Default for PersistentState {
@@ -46,6 +47,7 @@ impl Default for PersistentState {
         Self {
             active_token: ActiveToken::RootAccessToken,
             tokens: HashMap::new(),
+            working_directory: "/".to_string(),
         }
     }
 }
@@ -53,6 +55,22 @@ impl Default for PersistentState {
 impl PersistentState {
     pub fn get_state_filepath() -> io::Result<PathBuf> {
         get_absolute_path("~/.sfs/state.json")
+    }
+
+    pub fn get_wd(&self) -> &str {
+        self.working_directory.as_str()
+    }
+
+    pub fn set_wd(&mut self, wd: &str) -> anyhow::Result<()> {
+        self.working_directory = if wd != "/" {
+            wd.trim_end_matches("/").to_string()
+        } else {
+            wd.to_string()
+        };
+
+        self.save()?;
+
+        Ok(())
     }
 
     pub fn get_untitled_token_tag(&self) -> String {
@@ -94,8 +112,15 @@ impl PersistentState {
         let contents = match fs::read_to_string(Self::get_state_filepath()?) {
             Ok(contents) => contents,
             Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                let state_filepath = Self::get_state_filepath()?;
                 let default_contents = serde_json::to_vec_pretty(&PersistentState::default())?;
-                fs::write(Self::get_state_filepath()?, &default_contents)?;
+
+                fs::DirBuilder::new().recursive(true).create(
+                    state_filepath
+                        .parent()
+                        .expect("ERROR! invalid default state file path '{state_filepath}'"),
+                )?;
+                fs::write(state_filepath, &default_contents)?;
 
                 String::from_utf8(default_contents)?
             }

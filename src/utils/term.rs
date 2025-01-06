@@ -5,38 +5,35 @@ where
 {
     let mut n_col_padding: Vec<u32> = vec![0; n_cols];
 
-    let mut i = 0;
-    while i < data.len() {
+    let mut padding_iter = data.clone().peekable();
+    'outer: while padding_iter.peek().is_some() {
         for j in 0..n_cols {
-            let path_str = match data.clone().nth(i + j) {
+            let path_str = match padding_iter.next() {
                 Some(p) => p,
-                None => continue,
+                None => {
+                    break 'outer;
+                }
             };
             let path_str = path_str.as_ref();
 
-            n_col_padding[j] = n_col_padding[j].max(path_str.len() as u32);
+            n_col_padding[j] = n_col_padding[j].max((path_str.len() + 2) as u32);
         }
-
-        i += n_cols;
     }
 
     let mut output_str = String::new();
-    let mut i = 0;
-    while i < data.len() {
+    let mut output_iter = data.clone().peekable();
+    'outer: while output_iter.peek().is_some() {
         for j in 0..n_cols {
-            let data_str = match data.clone().nth(i + j) {
+            let data_str = match output_iter.next() {
                 Some(p) => p,
-                None => continue,
+                None => break 'outer,
             };
             let data_str = data_str.as_ref();
 
             output_str += &format!("{0:<1$}  ", data_str, n_col_padding[j] as usize);
         }
-        if i + n_cols < data.len() - 1 {
-            output_str += "\n";
-        }
 
-        i += n_cols;
+        output_str += "\n";
     }
 
     output_str

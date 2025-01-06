@@ -10,3 +10,5 @@ pub mod str2x;
 pub mod term;
 pub mod tokens;
 pub mod url;
+pub mod x2str;
+
