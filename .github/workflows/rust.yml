@@ -1,0 +1,20 @@
+name: rust build pipeline
+
+on:
+  push:
+    branches: [ "main" ]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+    - name: install cross
+      run: cargo install cross
+    - name: run build
+      run: cross build --target aarch64-apple-darwin
