@@ -1,6 +1,6 @@
 # Simple Fucking Storage (SFS) [WIP]
 
-Use "Simple File Storage" for scenarios when you really can't use any NSFW words :)
+Use **Simple File Storage** for scenarios when you really can't use any NSFW words :)
 
 ## Basic Idea
 
