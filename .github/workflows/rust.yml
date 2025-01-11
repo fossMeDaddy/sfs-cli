@@ -15,4 +15,4 @@ jobs:
     steps:
     - uses: actions/checkout@v4
     - name: run build
-      run: cross build --target aarch64-apple-darwin
+      run: cargo build --target aarch64-apple-darwin
