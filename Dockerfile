@@ -10,10 +10,9 @@ RUN apt-get update && \
         && \
     rm -rf /var/lib/apt/lists/*
 RUN apt-get update
-RUN apt-get install libdbus-1-dev pkg-config -y
+RUN apt-get install curl git libdbus-1-dev pkg-config -y
 
 # SETUP RUST DEV ENVIRONMENT
-RUN apt-get install curl -y
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile default
 RUN . "$HOME/.cargo/env"
 
@@ -21,6 +20,7 @@ ENV CARGO_HOME=/root/.cargo
 ENV PATH=$CARGO_HOME/bin:$PATH
 
 WORKDIR /app
+RUN git clone https://github.com/fossMeDaddy/sfs-cli
 COPY . .
 
 # RUN cargo build --release
