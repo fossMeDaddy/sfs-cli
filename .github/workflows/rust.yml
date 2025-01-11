@@ -15,8 +15,13 @@ jobs:
     steps:
     - uses: actions/checkout@v4
 
-    - name: Add aarch64-apple-darwin target
-      run: rustup target add aarch64-apple-darwin
+    - name: add targets
+      run: |
+        rustup target add x86_64-unknown-linux-gnu
+        rustup target add aarch64-unknown-linux-gnu
     
-    - name: run build
+    - name: run build (x86)
       run: cargo build --target aarch64-apple-darwin
+
+    - name: run build (arm)
+      run: cargo build --target aarch64-unknown-linux-gnu
