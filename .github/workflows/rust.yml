@@ -17,7 +17,7 @@ jobs:
 
     - name: prereqs
       run: |
-        sudo apt install libdbus-1-dev pkg-config
+        sudo apt install libdbus-1-dev pkg-config libssl-dev
 
     - name: add targets
       run: |
