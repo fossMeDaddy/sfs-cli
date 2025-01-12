@@ -8,24 +8,36 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  build:
-
+  build-linux-x86:
     runs-on: ubuntu-latest
 
     steps:
     - uses: actions/checkout@v4
 
-    - name: prereqs
-      run: |
-        sudo apt install openssl libdbus-1-dev pkg-config libssl-dev
+    - name: run build
+      run: cargo build --release
 
-    - name: add targets
-      run: |
-        rustup target add x86_64-unknown-linux-gnu
-        rustup target add aarch64-unknown-linux-gnu
-    
-    - name: run build (x86)
-      run: cargo build --target x86_64-unknown-linux-gnu
+    - name: upload build
+      uses: actions/upload-artifact@v4
+      with:
+        name: x86_64-unknown-linux-gnu
+        path: ./target/release/sfs-cli
+        retention-days: 1
+        overwrite: true
 
-    - name: run build (arm)
-      run: cargo build --target aarch64-unknown-linux-gnu
+  build-macos:
+    runs-on: macos-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: run build
+      run: cargo build --release
+
+    - name: upload build
+      uses: actions/upload-artifact@v4
+      with:
+        name: aarch64-apple-darwin
+        path: ./target/release/sfs-cli
+        retention-days: 1
+        overwrite: true
