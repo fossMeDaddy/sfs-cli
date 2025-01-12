@@ -68,5 +68,6 @@ jobs:
       - name: hawk tuah
         uses: "marvinpinto/action-automatic-releases@latest"
         with:
+          prerelease: false
           repo_token: ${{ secrets.GH_TOKEN }}
           files: dist/*
