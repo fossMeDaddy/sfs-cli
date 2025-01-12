@@ -66,8 +66,7 @@ jobs:
         run: ls -la dist
 
       - name: hawk tuah
-        uses: softprops/action-gh-release@v2
-        if: startsWith(github.ref, 'refs/tags/')
+        uses: "marvinpinto/action-automatic-releases@latest"
         with:
-          token: ${{ secrets.GH_TOKEN }}
-          files: dist
+          repo_token: ${{ secrets.GH_TOKEN }}
+          files: dist/*
