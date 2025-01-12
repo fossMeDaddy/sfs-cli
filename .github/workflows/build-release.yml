@@ -70,4 +70,6 @@ jobs:
         with:
           prerelease: false
           repo_token: ${{ secrets.GH_TOKEN }}
-          files: dist/*
+          files: |
+            dist/aarch64-apple-darwin
+            dist/x86_64-unknown-linux-gnu
