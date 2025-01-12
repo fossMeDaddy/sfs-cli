@@ -1,7 +1,8 @@
-name: release
+name: rust build pipeline
 
 on:
-  push
+  push:
+    branches: [ "main" ]
 
 env:
   CARGO_TERM_COLOR: always
