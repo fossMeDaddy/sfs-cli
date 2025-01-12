@@ -1,8 +1,8 @@
-name: rust build pipeline
+name: Releeee- eeee- eeeeease!
 
 on:
   push:
-    branches: [ "main" ]
+    branches: ["main"]
 
 env:
   CARGO_TERM_COLOR: always
@@ -13,6 +13,10 @@ jobs:
 
     steps:
     - uses: actions/checkout@v4
+
+    - name: prereqs install
+      run: |
+        apt install libdbus-1-dev pkg-config
 
     - name: run build
       run: cargo build --release
@@ -41,3 +45,6 @@ jobs:
         path: ./target/release/sfs-cli
         retention-days: 1
         overwrite: true
+  
+  release:
+    
