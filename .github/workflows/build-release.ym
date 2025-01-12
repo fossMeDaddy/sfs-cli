@@ -1,8 +1,10 @@
-name: rust build pipeline
+name: build release
 
 on:
   push:
-    branches: [ "main" ]
+    tags:
+      - "v*.*.*"
+      - "v*.*.*-*"
 
 env:
   CARGO_TERM_COLOR: always
@@ -47,4 +49,22 @@ jobs:
         overwrite: true
   
   release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: aarch64-apple-darwin
+      - uses: actions/download-artifact@v4
+        with:
+          name: x86_64-unknown-linux-gnu
+
+      - name: hawk tuah
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: |
+            x86_64-unknown-linux-gnu
+            aarch64-apple-darwin
+        
     
