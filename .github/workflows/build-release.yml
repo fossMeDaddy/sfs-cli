@@ -26,7 +26,7 @@ jobs:
     - name: upload build
       uses: actions/upload-artifact@v4
       with:
-        name: x86_64-unknown-linux-gnu.bin
+        name: x86_64-unknown-linux-gnu
         path: ./target/release/sfs-cli
         retention-days: 1
         overwrite: true
@@ -43,7 +43,7 @@ jobs:
     - name: upload build
       uses: actions/upload-artifact@v4
       with:
-        name: aarch64-apple-darwin.bin
+        name: aarch64-apple-darwin
         path: ./target/release/sfs-cli
         retention-days: 1
         overwrite: true
@@ -55,16 +55,18 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: aarch64-apple-darwin.bin
-          path: dist/aarch64-apple-darwin.bin
+          name: aarch64-apple-darwin
+          path: dist/aarch64-apple-darwin
           
       - uses: actions/download-artifact@v4
         with:
-          name: x86_64-unknown-linux-gnu.bin
-          path: dist/x86_64-unknown-linux-gnu.bin
+          name: x86_64-unknown-linux-gnu
+          path: dist/x86_64-unknown-linux-gnu
 
-      - name: ls
-        run: ls -la dist
+      - name: file moves
+        run: |
+          mv dist/x86_64-unknown-linux-gnu/sfs-cli dist/x86_64-unknown-linux-gnu.bin
+          mv dist/aarch64-apple-darwin/sfs-cli dist/aarch64-apple-darwin.bin
 
       - name: hawk tuah
         uses: "marvinpinto/action-automatic-releases@latest"
