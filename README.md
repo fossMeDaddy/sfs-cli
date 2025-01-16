@@ -24,8 +24,8 @@ a permission format the contains the following information:
 
 here are some examples of valid ACPs:
 - `r:/projects/sfs/src.zip` - `r`ead access to the file present at /projects/sfs/src.zip
-- `rcu:/projects/sfs/src/**.*` - `c`reate, `r`ead and `u`pdate access to file of ANY type (`.*`) in ALL NESTED DIRECTORIES in src (`**`)
-- `rd:/tmp/artifacts/arm64-*.bin` - `r`ead and `d`elete access to any file starting with name "arm64-" and having a ".bin" extension (`arm64-*.bin`) present in the "artifacts" directory. NO NESTED DIRECTORIES ARE PERMITTED due to absence of `**`
+- `rcu:/projects/sfs/src/**.*` - `c`reate, `r`ead and `u`pdate access to file of ANY type (`*.*`) in ALL FILES OF ALL NESTED DIRECTORIES in src (`**`)
+- `rd:/tmp/artifacts/arm64-*.bin` - `r`ead and `d`elete access to any file starting with name "arm64-" and having a ".bin" extension (`arm64-*.bin`) present in the "artifacts" directory. NO NESTED DIRECTORIES ARE PERMITTED due to the absence of `**`
 
 as the owner of a file system, let's say I have a file tree in my file system that looks like this:
 ```
