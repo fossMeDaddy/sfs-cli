@@ -54,6 +54,8 @@ are covered by the pseudo-regex string.
 
 And this is all there is to SFS, so you don't have to take 30-hour udemy courses on how to make your pre-signed url work.
 
-> NOTE:
->
-> This is a heavy work in progress and not even functional as of me writing this readme (30 oct, 24)
+---
+
+Now in closed alpha, to install the CLI run:
+
+> curl -s https://rmd.sh/sfs | bash
