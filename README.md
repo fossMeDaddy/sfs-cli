@@ -58,4 +58,6 @@ And this is all there is to SFS, so you don't have to take 30-hour udemy courses
 
 Now in closed alpha, to install the CLI run:
 
-> curl -s https://rmd.sh/sfs | bash
+```bash
+curl -s https://rmd.sh/sfs | bash
+```
