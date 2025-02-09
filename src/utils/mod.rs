@@ -7,8 +7,8 @@ pub mod local_auth;
 pub mod net;
 pub mod paths;
 pub mod str2x;
+pub mod streams;
 pub mod term;
 pub mod tokens;
 pub mod url;
 pub mod x2str;
-

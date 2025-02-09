@@ -3,7 +3,7 @@ use base64::prelude::*;
 use url::Url;
 
 use crate::{
-    shared_types::AppContext,
+    config::CONFIG,
     state::{ActiveToken, STATE},
     utils::local_auth::LocalAuthData,
 };
@@ -14,10 +14,14 @@ pub mod fs_files;
 pub mod tokens;
 pub mod uploads;
 pub mod usage;
+pub mod utils;
 
-pub fn get_base_url(ctx: &AppContext) -> anyhow::Result<Url> {
-    let mut url = Url::parse(ctx.config.get_base_url())?;
-    if let Some((access_token, _)) = ctx.state.get_active_token()? {
+pub fn get_base_url() -> anyhow::Result<Url> {
+    let config = CONFIG.read().unwrap();
+    let state = STATE.read().unwrap();
+
+    let mut url = Url::parse(config.get_base_url())?;
+    if let Some((access_token, _)) = state.get_active_token()? {
         url.set_query(Some(format!("token={}", access_token).as_str()));
     }
 
@@ -30,13 +34,14 @@ pub fn get_builder(method: reqwest::Method, url: Url) -> anyhow::Result<reqwest:
 }
 
 pub fn get_sudo_builder(
-    ctx: &AppContext<'_>,
     method: reqwest::Method,
     url: Url,
 ) -> anyhow::Result<reqwest::RequestBuilder> {
+    let state = STATE.read().unwrap();
+
     let client = reqwest::Client::new();
 
-    match ctx.state.active_token {
+    match state.active_token {
         ActiveToken::RootAccessToken => {}
         _ => return Err(anyhow!("only FileSystem owners are allowed to perform this action! either switch to your access token or ask the owner to perform this action for you."))
     };

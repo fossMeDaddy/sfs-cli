@@ -44,6 +44,7 @@ pub fn get_absolute_path(path: &str, wd: &str) -> String {
     return String::from("/") + &abs_path.join("/");
 }
 
+/// split path into (dirpath, filename)
 pub fn split_path(path: &str) -> (&str, &str) {
     let split_i = path
         .chars()
@@ -57,7 +58,7 @@ pub fn split_path(path: &str) -> (&str, &str) {
     }
 }
 
-pub fn join_paths(paths: Vec<&str>) -> String {
+pub fn join_paths(paths: &[&str]) -> String {
     let mut segs_iter = paths.iter();
 
     let mut path_str = String::from(segs_iter.next().unwrap_or(&"/").trim_end_matches("/"));

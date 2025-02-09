@@ -21,7 +21,7 @@ fn filter_str2json(
     }
 }
 
-/// possible inputs: `2024-01-01 12:12:12...2024-01-01 12:12:12`, `2024-01-01 12:12:12...`, `...2024-01-01 12:12:12`
+/// possible input formats: `2024-01-01 12:12:12...2024-01-01 12:12:12`, `2024-01-01 12:12:12...`, `...2024-01-01 12:12:12`
 pub fn parse_filter_str(filter_col: FilterCol, filter_str: &str) -> anyhow::Result<Vec<Filter>> {
     let filter_str = filter_str.trim();
 

@@ -1,99 +1,176 @@
 use std::{
+    collections::HashSet,
     env::{current_dir, var},
-    io,
-    os::unix::fs::MetadataExt,
-    path::{PathBuf, MAIN_SEPARATOR},
+    path::{Path, PathBuf, MAIN_SEPARATOR, MAIN_SEPARATOR_STR},
     str::FromStr,
 };
 
-use chrono::Duration;
-use clap::Parser;
+use anyhow::anyhow;
+use chrono::{DateTime, Duration, Utc};
+use clap::{Args, Parser};
 use colored::*;
 use futures_util::StreamExt;
 use inquire::Confirm;
+use orion::{aead::streaming, kdf};
 use serde_json::json;
-use tokio::{fs, io::AsyncWriteExt};
+use tokio::io::{self, AsyncWriteExt};
 use url::Url;
 use zip::{write::SimpleFileOptions, CompressionMethod, ZipWriter};
 
 use crate::{
-    api::{self, fs_files::*},
-    config::{LogLevel, CONFIG},
-    constants::{self, MIME_TYPES, UNKNOWN_MIME_TYPE, ZIPFILE_MIME_TYPE},
+    api::{self, fs_files::*, uploads::UploadFileOpts},
+    constants,
     shared_types::{
-        AccessTokenPermission, AppContext, CliSubCmd, FsFile, PermissionChar,
-        UploadSingleBlogMetadata,
+        self, AccessTokenPermission, CliSubCmd, FsFile, PermissionChar, UploadBlobMetadata,
     },
     state::STATE,
     utils::{
-        chirpy_logs,
-        crypto::{self, Decrypter},
+        self,
+        crypto::derive_key_from_password,
         dirtree,
         files::{self, get_share_url},
-        local_auth::LocalAuthData,
         paths, str2x, tokens,
     },
 };
 
+#[derive(Args)]
+#[group(multiple = true)]
+pub struct CmdUploadParams {
+    #[arg(long)]
+    /// mark the uploaded file(s) public. public files do not require access tokens to be viewed
+    public: bool,
+
+    #[arg(long)]
+    /// if this flag is true, the program will try to read from shell variable "PASSWORD" or prompt for a password
+    password: bool,
+
+    #[arg(long)]
+    /// MIME type for the content being uploaded. (guesses from file extension if unspecified, no effect for multi-file upload)
+    content_type: Option<String>,
+
+    #[arg(long)]
+    /// generate a safely-shareable url containing read-only permissions for the uploaded file. (default expiry: 30 mins)
+    share: bool,
+
+    #[arg(long, value_parser = str2x::str2duration)]
+    /// provide custom expiry time for the share url. (e.g "AAdBBhCCmDDs", "7d30s", "2h30m12s", "30m" [default])
+    share_exp: Option<Duration>,
+
+    #[arg(long, value_parser = str2x::str2duration)]
+    /// set the 'max-age' value for CDN cache distribution, defaults to 0 (format: 12d23h34m45s)
+    cache_max_age: Option<Duration>,
+
+    #[command(flatten)]
+    exp_input: shared_types::CmdExpiryParams,
+}
+impl CmdUploadParams {
+    pub fn into_upload_metadata(
+        &self,
+        name: String,
+        dir_path: String,
+        force_write: bool,
+        encryption: Option<shared_types::EncryptionMetadata>,
+    ) -> shared_types::UploadBlobMetadata {
+        shared_types::UploadBlobMetadata {
+            name,
+            dir_path,
+            is_public: self.public,
+            force_write,
+            deleted_at: self.get_deleted_at(),
+            cache_max_age_seconds: self.get_cache_max_age_seconds(),
+            content_type: self.content_type.clone(),
+            encryption,
+        }
+    }
+
+    pub fn get_password(&self) -> Option<String> {
+        match var("PASSWORD") {
+            Ok(pwd) => Some(pwd),
+            Err(_) => match self.password {
+                true => Some(
+                    dialoguer::Password::new()
+                        .with_prompt("create password (remember this password!)")
+                        .with_confirmation("confirm", "passwords don't match!")
+                        .interact()
+                        .unwrap(),
+                ),
+                false => None,
+            },
+        }
+    }
+
+    pub fn is_share(&self) -> bool {
+        self.share || self.share_exp.is_some()
+    }
+
+    // get default now+30mins expiry date or the custom one in `share_exp`
+    pub fn get_share_expiry(&self) -> DateTime<Utc> {
+        self.share_exp
+            .map(|s| Utc::now() + s)
+            .unwrap_or(Utc::now() + Duration::minutes(30))
+    }
+
+    pub fn get_deleted_at(&self) -> Option<DateTime<Utc>> {
+        match self.exp_input.is_unset() {
+            true => None,
+            false => Some(self.exp_input.get_expires_at()),
+        }
+    }
+
+    pub fn get_cache_max_age_seconds(&self) -> Option<u64> {
+        self.cache_max_age.map(|d| d.abs().num_seconds() as u64)
+    }
+}
+
 #[derive(Parser)]
 pub struct UploadBlobCommand {
-    /// multiple files and/or directories are uploaded as a zipfile, single file as-is.
+    /// list of path patterns. (default: files are uploaded in a single zip file in case of multiple files covered by the pattern)
     source_path_patterns: Vec<String>,
 
     #[arg(long)]
-    /// remote dir path. by default, CWD set by you in this cli, will be used as remote dirpath to upload file(s).
+    /// relative or absolute path to an existing remote directory. (default: currently set WD)
     dirpath: Option<String>,
 
-    #[arg(long)]
-    /// mark the upload public, anyone with the file id can view, no access token required
-    public: bool,
-
     #[arg(long, short)]
-    /// relative, absolute or just name of the output zip file. (has no effect for non-encrypted single file uploads)
-    output: Option<String>,
-
-    #[arg(long)]
-    /// take password input in a 'PASSWORD' env variable or from a text prompt
-    password: bool,
-
-    #[arg(long, short)]
-    /// even if a remote file already exists with the same name in the dirpath, it will forcefully write (update)
-    force: bool,
-
-    #[arg(long, short)]
-    /// the file will be saved as this name in "dirpath" after upload (has no effect on multiple file uploads)
+    /// name to save the file as after uploading, a random name is generated if not provided
     name: Option<String>,
 
-    #[arg(long)]
-    /// generates a read-only access token embedded url for the upload. url is valid for 30mins. (has no effect on public uploads)
-    share: bool,
+    #[arg(long, short)]
+    /// update file in case a remote file already exists with same upload path
+    force: bool,
+
+    #[command(flatten)]
+    upload_params: CmdUploadParams,
 
     #[arg(long)]
-    /// used in conjunction with 'share', provide custom expiry time for the share url. (e.g "AAdBBhCCmDDs", "7d30s", "2h30m12s", "30m" [default])
-    share_exp: Option<String>,
-
-    #[arg(long, value_parser = str2x::str2duration)]
-    /// set the 'max-age' value for cache, defaults to 0 (format: 12d23h34m45s)
-    max_age: Option<Duration>,
+    /// all the files and the directory structures covered under the path pattern will be recursively created in remote dirpath
+    recursive: bool,
 
     #[arg(long)]
-    /// do not display confirm prompt when uploading multiple files matching with provided path pattern
+    /// do not display any confirm prompts
     no_confirm: bool,
 }
 
 #[derive(Parser)]
-pub struct GetBlobCommand {
-    /// gimme anything, remote file path relative or absolute or a file url with/without embedded token
-    location_hint: String,
+pub struct SelectCommand {
+    filepath: String,
 
-    #[arg(short, long)]
-    /// store the downloaded file at this path on your machine. can be relative. defaults to CWD
-    output: Option<String>,
+    #[command(flatten)]
+    upload_params: CmdUploadParams,
+}
+
+#[derive(Parser)]
+pub struct CatCommand {
+    /// takes in relative path, absolute path, or a url of the remote file
+    location_hint: String,
 }
 
 impl CliSubCmd for UploadBlobCommand {
     async fn run(&self) {
-        let paths: Vec<PathBuf> = self
+        let state = STATE.read().unwrap();
+        let wd = state.get_wd();
+
+        let paths: Vec<(u64, PathBuf)> = self
             .source_path_patterns
             .iter()
             .flat_map(|patt| {
@@ -111,239 +188,269 @@ impl CliSubCmd for UploadBlobCommand {
             );
             return;
         }
+        let only_paths = paths.iter().map(|(_, p)| p);
 
         println!(
             "{}",
-            format!("Files covered by pattern: {}", paths.len()).bold()
+            format!("files covered by pattern: {}", paths.len()).bold()
         );
 
-        let ctx = AppContext {
-            config: &CONFIG.try_lock().unwrap(),
-            state: &STATE.try_lock().unwrap(),
-        };
-        let wd = ctx.state.get_wd();
-
-        let remote_dirpath = match &self.dirpath {
+        let upload_dirpath = match &self.dirpath {
             Some(dirpath) => dirtree::get_absolute_path(dirpath, wd),
             None => wd.to_string(),
         }
         .to_string();
 
-        if paths.len() > 1 {
-            let (ref_wd, pretty_paths) = paths::get_pretty_paths(&paths);
+        let (ref_wd, pretty_paths) =
+            paths::get_pretty_paths(paths.iter().map(|(size, p)| (*size, p)));
 
-            println!();
-            if ref_wd.len() > 0 {
-                println!("{}", ref_wd.bold().dimmed());
-            }
-            println!("{}", pretty_paths.dimmed().blue());
-            println!();
+        println!();
+        if ref_wd.len() > 0 {
+            println!("{}", ref_wd.bold().dimmed());
+        }
+        println!("{}", pretty_paths.dimmed().blue());
+        println!();
 
-            if !self.no_confirm {
-                let confirm = Confirm::new(&format!(
-                    "{} files matched the pattern, confirm to upload at {}",
-                    paths.len(),
-                    remote_dirpath.bold()
-                ))
-                .with_default(false)
-                .prompt()
-                .expect("error occured while displaying confirm prompt!");
+        if !self.no_confirm {
+            let confirm = Confirm::new(&format!(
+                "{} files will be uploaded at {}, confirm:",
+                paths.len(),
+                upload_dirpath.bold()
+            ))
+            .with_default(false)
+            .prompt()
+            .expect("error occured while displaying confirm prompt!");
 
-                if !confirm {
-                    println!("Aborted upload.");
-                    return;
-                }
+            if !confirm {
+                println!("Aborted upload.");
+                return;
             }
         }
 
-        let password: Option<String> = match var("PASSWORD") {
-            Ok(pwd) => Some(pwd),
-            Err(_) => match self.password {
-                true => Some(
-                    dialoguer::Password::new()
-                        .with_prompt("Create zipfile encryption password")
-                        .with_confirmation("Confirm", "Passwords don't match!")
-                        .interact()
-                        .unwrap(),
-                ),
-                false => None,
-            },
+        if self.recursive {
+            let ref_wd = Self::get_ref_wd_from_paths(only_paths.clone());
+
+            println!("creating directory structure...");
+            Self::create_dirtree_from_filepaths(wd, ref_wd, only_paths.clone())
+                .await
+                .unwrap();
+
+            println!("starting upload...");
+            Self::upload_files(wd, ref_wd, only_paths.clone(), self.force)
+                .await
+                .unwrap();
+
+            println!("\n{}", "files uploaded successfully.".bold());
+            return;
+        }
+
+        let is_zip_file = paths.len() > 1;
+
+        let password = self.upload_params.get_password();
+
+        let upload_filepath = if is_zip_file {
+            &self.get_zipfile_from_paths(only_paths, password.as_deref())
+        } else {
+            &paths[0].1
         };
-
-        let single_file_upload = paths.len() == 1;
-
-        let mut upload_filepath = paths[0].clone();
-        if !single_file_upload {
-            upload_filepath = self.get_zipfile_from_paths(&paths, password.as_deref());
-        }
-
-        let mut upload_file = fs::File::open(&upload_filepath)
-            .await
-            .expect("error occured while opening file for upload!");
-        let metadata = upload_file
-            .metadata()
-            .await
-            .expect("error occured while reading file metadata!");
-
-        let file_ext = files::get_file_ext(
+        let filename = self.name.as_deref().unwrap_or(
             upload_filepath
+                .file_name()
+                .expect(&format!(
+                    "invalid path provided '{}'",
+                    upload_filepath.to_string_lossy()
+                ))
                 .to_str()
-                .expect("invalid file path provided!"),
+                .expect("invalid upload filepath! non-utf8 string provided."),
         );
-        let file_type = constants::MIME_TYPES
-            .get(file_ext)
-            .unwrap_or(&constants::UNKNOWN_MIME_TYPE);
 
-        let filename = match &self.name {
-            Some(name) => Some(name.to_string()),
-            None => match upload_filepath.file_stem() {
-                Some(filename) => Some(filename.to_string_lossy().to_string()),
-                None => None,
-            },
-        };
+        println!(
+            "self.exp_input {:?}",
+            self.upload_params.exp_input.is_unset()
+        );
 
-        if metadata.size() < constants::MIN_MULTIPART_UPLOAD_SIZE as u64 {
-            let upload_metadata = UploadSingleBlogMetadata {
-                name: filename.clone(),
-                is_public: self.public,
-                is_encrypted: password.is_some(),
-                dir_path: remote_dirpath,
-                file_type: file_type.to_string(),
-                force_write: self.force,
-                cache_max_age_seconds: match self.max_age {
-                    Some(max_age) => Some(max_age.num_seconds().abs() as u64),
-                    None => None,
-                },
-            };
+        let mut opts = UploadFileOpts::new(upload_filepath, password.as_deref());
+        opts.is_zip_file = is_zip_file;
+        let fs_file = api::uploads::upload_file(
+            self.upload_params.into_upload_metadata(
+                filename.to_string(),
+                upload_dirpath.clone(),
+                self.force,
+                None,
+            ),
+            opts,
+        )
+        .await
+        .expect("error occured while uploading file!");
 
-            let fs_file = api::uploads::upload_file(
-                &ctx,
-                &upload_metadata,
-                &mut upload_file,
-                match single_file_upload {
-                    true => password.as_deref(),
-                    false => None,
-                },
-            )
-            .await
-            .expect("error occured while uploading file!");
-
-            if password.is_some() {
-                println!(
-                    "{}",
-                    String::from("PLEASE ENSURE YOU REMEMBER/SAVE THIS PASSWORD!").bold()
-                );
-
-                match ctx.config.get_log_level() {
-                    LogLevel::Chirpy => chirpy_logs::recalldeezai_product_placement(),
-                    _ => {}
-                };
-            }
-
-            if !single_file_upload {
-                drop(upload_file);
-                _ = fs::remove_file(&upload_filepath).await;
-            }
-
-            let auth_data = LocalAuthData::get()
-                .expect("You're not logged in! please login before uploading files.");
-
+        if self.upload_params.is_share() {
             let share_url: String;
-            if self.public {
-                share_url = files::get_share_url(None, &fs_file.storage_id, &ctx)
+
+            if self.upload_params.public {
+                share_url = files::get_share_url(None, &fs_file.storage_id)
                     .expect("error occured while generating share url!")
                     .to_string();
-            } else if self.share {
-                let access_token_ttl = str2x::str2duration(match &self.share_exp {
-                    Some(exp) => exp.as_str(),
-                    None => "30m",
-                })
-                .expect("invalid share expiry time provided!");
-
+            } else {
                 let acpl: Vec<String> = vec![tokens::get_acp(
                     AccessTokenPermission::from_str(&PermissionChar::Read.to_string())
                         .expect("Error occured while parsing read access token permission"),
-                    &format!("{}/{}", upload_metadata.dir_path, fs_file.name),
+                    &format!("{}/{}", upload_dirpath, fs_file.name),
                 )];
-                let expires_at = chrono::Utc::now() + access_token_ttl;
+                let expires_at = self.upload_params.get_share_expiry();
 
-                let res_data = api::tokens::generate_access_token(&ctx, &acpl, &expires_at)
+                let res_data = api::tokens::generate_access_token(&acpl, &expires_at)
                     .await
                     .expect("error occured while generating access token!");
 
-                share_url =
-                    files::get_share_url(Some(&res_data.access_token), &fs_file.storage_id, &ctx)
-                        .expect("error occured while generating share url!")
-                        .to_string();
-            } else {
-                share_url =
-                    files::get_share_url(Some(&auth_data.access_token), &fs_file.storage_id, &ctx)
-                        .expect("error occured while generating share url!")
-                        .to_string();
-
-                println!(
-                    "{}",
-                    String::from(
-                        "this link is only for private view, not to be shared with anyone!"
-                    )
-                    .bold()
-                );
-                println!(
-                    "{}",
-                    String::from(
-                        "to share, either make this file public or generate a shareable private link."
-                    )
-                    .bold()
-                );
+                share_url = files::get_share_url(Some(&res_data.access_token), &fs_file.storage_id)
+                    .expect("error occured while generating share url!")
+                    .to_string();
             }
 
             println!("\n{}\n", share_url.blue());
-
-            println!(
-                "{}",
-                format!(
-                    "Full path: {}",
-                    dirtree::join_paths(vec![&upload_metadata.dir_path, &fs_file.name]),
-                )
-                .dimmed()
-            );
-        } else {
-            todo!("multipart upload not implemented yet!");
         }
+
+        println!(
+            "{}",
+            format!(
+                "Upload full path: {}",
+                dirtree::join_paths(&[&upload_dirpath, &fs_file.name]),
+            )
+            .dimmed()
+        );
     }
 }
 
 impl UploadBlobCommand {
-    fn get_zipfile_from_paths(&self, paths: &Vec<PathBuf>, password: Option<&str>) -> PathBuf {
-        let mut output_filepath =
-            current_dir().expect("what kind of sadass machine is this? CWD NOT FOUND OR INVALID!");
-
-        if let Some(output_filepath_str) = &self.output {
-            output_filepath = paths::get_absolute_path(output_filepath_str)
-                .expect("error occured while parsing output path to absolute path!")
-                .with_extension("zip");
-
-            if let Some(output_filepath_parent) = output_filepath.parent() {
-                let _ = fs::create_dir_all(output_filepath_parent);
+    fn get_content_type(&self, is_zip_file: bool) -> Option<String> {
+        let mut content_type: Option<String> = None;
+        if let Some(ct) = self.upload_params.content_type.as_deref() {
+            if !is_zip_file {
+                content_type = Some(
+                    constants::MIME_TYPES.values()
+                        .find(|t| *t == &ct)
+                        .expect(&format!("{} is not a valid MIME type, if you think this is an error, please report this issue.", ct))
+                        .to_string()
+                );
             }
-        } else {
-            output_filepath.push(format!(
-                "upload__{}.zip",
-                chrono::Local::now().format("%Y-%m-%d_%H-%M-%S").to_string()
-            ));
         }
 
-        let zipfile = std::fs::File::create(&output_filepath)
-            .expect("error creating an upload zip file in CWD");
-        let mut zipwriter = ZipWriter::new(zipfile);
+        content_type
+    }
 
-        let mut options = SimpleFileOptions::default().compression_method(CompressionMethod::Zstd);
-        if let Some(password) = password {
-            options = options.with_aes_encryption(zip::AesMode::Aes256, password);
+    async fn create_dirtree_from_filepaths<'a, I>(
+        wd: &'a str,
+        ref_wd: &'a str,
+        filepaths: I,
+    ) -> anyhow::Result<()>
+    where
+        I: ExactSizeIterator<Item = &'a PathBuf> + Clone,
+    {
+        let filepaths = filepaths.into_iter();
+
+        let mut err_msg = String::new();
+
+        let mkdir_paths = filepaths
+            .map(|filepath| {
+                let dirpath = filepath.parent().unwrap_or(Path::new(""));
+                let path = dirpath.to_str().unwrap().trim_start_matches(ref_wd);
+                utils::dirtree::join_paths(&[wd, path])
+            })
+            .collect::<HashSet<String>>();
+        for res in futures_util::future::join_all(
+            mkdir_paths
+                .iter()
+                .map(|abs_path| api::dirtree::mkdir(&abs_path)),
+        )
+        .await
+        {
+            match res {
+                Err(err) => err_msg += &format!("{err}\n"),
+                Ok(_) => {}
+            }
         }
 
-        println!("{}", String::from("Unraveling file patterns...").bold());
-        let mut ref_wd = paths[0].to_str().unwrap();
+        if err_msg.len() > 0 {
+            return Err(anyhow!(err_msg));
+        }
+
+        Ok(())
+    }
+
+    /// filepaths MUST BE trimmed from ref_wd by the caller
+    async fn upload_files<'a, I>(
+        wd: &str,
+        ref_wd: &str,
+        filepaths: I,
+        force: bool,
+    ) -> anyhow::Result<()>
+    where
+        I: ExactSizeIterator<Item = &'a PathBuf> + Clone,
+    {
+        let filepaths = filepaths.into_iter();
+
+        let results = futures_util::future::join_all(filepaths.clone().filter_map(|filepath| {
+            let mut path_segs: Vec<&str> = match filepath.to_str() {
+                Some(p) => p.trim_start_matches(ref_wd),
+                None => {
+                    println!(
+                        "WARNING: path '{}' is not a valid utf8 string! skipping...",
+                        filepath.to_string_lossy()
+                    );
+
+                    return None;
+                }
+            }
+            .split(MAIN_SEPARATOR_STR)
+            .collect();
+
+            let filename = match path_segs.pop() {
+                Some(name) => name,
+                None => {
+                    return None;
+                }
+            };
+            let dirpath: String = utils::dirtree::join_paths(&[wd, &path_segs.join("/")]);
+
+            Some(api::uploads::upload_file(
+                UploadBlobMetadata {
+                    name: filename.to_string(),
+                    content_type: None,
+                    dir_path: dirpath,
+                    is_public: false,
+                    force_write: force,
+                    encryption: None,
+                    cache_max_age_seconds: Some(0),
+                    deleted_at: None,
+                },
+                UploadFileOpts::new(filepath, None),
+            ))
+        }))
+        .await;
+
+        let mut err_msg = String::from("");
+        for res in results {
+            match res {
+                Err(err) => {
+                    err_msg += &format!("{err}\n");
+                }
+                Ok(_) => {}
+            }
+        }
+        if err_msg.len() > 0 {
+            return Err(anyhow!("WARNING: some files failed to upload!\n{err_msg}"));
+        }
+
+        Ok(())
+    }
+
+    fn get_ref_wd_from_paths<'a, I>(paths: I) -> &'a str
+    where
+        I: ExactSizeIterator<Item = &'a PathBuf> + Clone,
+    {
+        let mut paths = paths.into_iter();
+
+        let mut ref_wd = paths.next().map(|p| p.to_str().unwrap_or("")).unwrap_or("");
         for path in paths {
             let path_str = path.to_str().unwrap();
 
@@ -369,8 +476,36 @@ impl UploadBlobCommand {
             ref_wd = &ref_wd[0..common_i];
         }
 
+        ref_wd
+    }
+
+    fn get_zipfile_from_paths<'a, I>(&self, paths: I, password: Option<&str>) -> PathBuf
+    where
+        I: ExactSizeIterator<Item = &'a PathBuf> + Clone,
+    {
+        let paths = paths.into_iter();
+
+        let mut output_filepath = current_dir().expect("cannot find os CWD!");
+
+        output_filepath.push(format!(
+            "tmp_upload__{}.zip",
+            chrono::Local::now().format("%Y-%m-%d_%H-%M-%S").to_string()
+        ));
+
+        let zipfile = std::fs::File::create(&output_filepath)
+            .expect("error creating an upload zip file in CWD");
+        let mut zipwriter = ZipWriter::new(zipfile);
+
+        let mut options = SimpleFileOptions::default().compression_method(CompressionMethod::Zstd);
+        if let Some(password) = password {
+            options = options.with_aes_encryption(zip::AesMode::Aes256, password);
+        }
+
+        println!("{}", String::from("Unraveling file patterns...").bold());
+        let ref_wd = Self::get_ref_wd_from_paths(paths.clone());
+
         println!("{}", String::from("Compressing files...").bold());
-        for path in paths {
+        for path in paths.clone() {
             let path_str = path.to_str().unwrap();
             let path_str = path_str
                 .strip_prefix(ref_wd)
@@ -385,8 +520,11 @@ impl UploadBlobCommand {
                     .start_file(path_str, options)
                     .expect("error occured while starting file write in zipfile");
 
-                let mut f = std::fs::File::open(&path).expect("error opening file for copy!");
-                io::copy(&mut f, &mut zipwriter).expect("error copying file into zipfile!");
+                let mut f = std::fs::File::open(&path).expect(&format!(
+                    "error opening file '{}' for copy!",
+                    path.to_string_lossy()
+                ));
+                std::io::copy(&mut f, &mut zipwriter).expect("error copying file into zipfile!");
             }
         }
 
@@ -394,19 +532,15 @@ impl UploadBlobCommand {
     }
 }
 
-impl CliSubCmd for GetBlobCommand {
+impl CliSubCmd for CatCommand {
     async fn run(&self) {
-        let ctx = AppContext {
-            config: &CONFIG.try_lock().unwrap(),
-            state: &STATE.try_lock().unwrap(),
-        };
-
-        let wd = ctx.state.get_wd();
+        let state = STATE.read().unwrap();
+        let wd = state.get_wd();
 
         let (url, file): (Url, Option<FsFile>) = match Url::parse(&self.location_hint) {
             Ok(url) => (url, None),
             Err(_err) => {
-                let active_token = ctx.state
+                let active_token = state
                     .get_active_token()
                     .expect("provided access token seems invalid!")
                     .expect("access token not found! please ensure you're logged in or have added an access token.");
@@ -414,9 +548,14 @@ impl CliSubCmd for GetBlobCommand {
                 let abs_path = dirtree::get_absolute_path(&self.location_hint, wd);
                 let (dirpath, filename) = dirtree::split_path(&abs_path);
 
-                let filters = vec![Filter(FilterCol::Name, FilterOp::Eq, json!(filename))];
-                let opts = GetFilesOpts::new(dirpath, Some(&filters));
-                let mut res_files = api::fs_files::get_files(&ctx, Some(opts))
+                let filters = FilterGroup {
+                    type_: FilterGroupType::And,
+                    filters: vec![Filter(FilterCol::Name, FilterOp::Eq, json!(filename))],
+                };
+                let mut opts = GetFilesOpts::new(dirpath.to_string());
+                opts.filters = Some(vec![filters]);
+
+                let mut res_files = api::fs_files::get_files(Some(opts))
                     .await
                     .expect("error occured while fetching file from given path!");
 
@@ -425,15 +564,15 @@ impl CliSubCmd for GetBlobCommand {
                     .pop()
                     .expect("no file found in the given path!");
 
-                match get_share_url(Some(&active_token.0), &file.storage_id, &ctx) {
+                match get_share_url(Some(&active_token.0), &file.storage_id) {
                     Ok(url) => (url, Some(file)),
                     Err(_) => {
-                        println!("unexpected error occured while generating url!");
+                        eprintln!("unexpected error occured while generating url!");
 
-                        println!("access token has been generated:");
-                        println!("{}", active_token.0.bold().cyan());
-                        println!();
-                        println!(
+                        eprintln!("access token has been generated:");
+                        eprintln!("{}", active_token.0.bold().cyan());
+                        eprintln!();
+                        eprintln!(
                             "{}",
                             format!(
                                 "expires_at: {}",
@@ -446,7 +585,7 @@ impl CliSubCmd for GetBlobCommand {
                             )
                             .dimmed()
                         );
-                        println!(
+                        eprintln!(
                             "{}",
                             format!("acpl: {}", active_token.1.acpl.join(", ").blue()).dimmed()
                         );
@@ -463,127 +602,260 @@ impl CliSubCmd for GetBlobCommand {
         };
 
         let metadata = match file {
-            Some(file) => PublicFileMetadata {
-                name: file.name,
-                is_encrypted: file.is_encrypted,
-            },
-            None => get_file_metadata(&ctx, storage_id, access_token.as_deref())
+            Some(file) => file,
+            None => get_file_metadata(storage_id, access_token.as_deref())
                 .await
                 .expect("error occured while fetching metadata for file!"),
         };
 
-        let filepath = match &self.output {
-            None => current_dir()
-                .expect("CWD NOT FOUND WTF?")
-                .join(&metadata.name),
-            Some(path) => {
-                let mut abs_path =
-                    paths::get_absolute_path(path).expect("provided output path seems invalid!");
+        let mut decryptor: Option<utils::crypto::CryptoStream<streaming::StreamOpener>> = None;
+        match &metadata.encryption {
+            Some(enc_metadata) => {
+                eprintln!("enc_metadata: {enc_metadata:?}");
+                if enc_metadata.attempt_decryption {
+                    let password = var("PASSWORD").unwrap_or_else(|_| {
+                        dialoguer::Password::new()
+                            .with_prompt("File is encrypted, please enter a password:")
+                            .interact()
+                            .unwrap()
+                    });
 
-                if !abs_path.is_file() {
-                    abs_path = abs_path.join(&metadata.name);
+                    let salt = kdf::Salt::from_slice(
+                        enc_metadata
+                            .salt
+                            .as_ref()
+                            .expect("encryption metadata field missing: 'salt'"),
+                    )
+                    .expect("invalid encryption metadata! password salt is not valid.");
+                    let key = derive_key_from_password(password.as_bytes(), &salt)
+                        .expect("error occured while deriving key!");
+                    let nonce = streaming::Nonce::from_slice(
+                        &enc_metadata
+                            .nonce
+                            .as_ref()
+                            .expect("encryption metadata field missing: 'header'"),
+                    )
+                    .expect(
+                        "error occured while parsing encryption metadata! received invalid header.",
+                    );
+                    let e = streaming::StreamOpener::new(&key, &nonce)
+                        .expect("error occured while initializing pull encrypted stream!");
+
+                    decryptor = Some(utils::crypto::CryptoStream { e, nonce, salt })
                 }
 
-                abs_path
+                enc_metadata.attempt_decryption
             }
+            None => false,
         };
 
-        let mut file_opts = fs::File::options();
-        file_opts.append(true).create_new(true);
-
-        let mut file = file_opts
-            .open(&filepath)
-            .await
-            .expect("error occured while opening file in append mode!");
-
-        let is_zip = MIME_TYPES
-            .get(files::get_file_ext(&metadata.name))
-            .unwrap_or(&UNKNOWN_MIME_TYPE)
-            == &ZIPFILE_MIME_TYPE;
-        let should_decrypt = metadata.is_encrypted && !is_zip;
-        let mut password: Option<String> = None;
-        if should_decrypt {
-            if let Ok(pwd) = var("PASSWORD") {
-                password = Some(pwd);
-            } else {
-                password = Some(
-                    dialoguer::Password::new()
-                        .with_prompt("File is encrypted, please enter a password:")
-                        .interact()
-                        .unwrap(),
-                );
-            }
-        }
-
-        let (_, res) = get_file_response(&ctx, storage_id, access_token.as_deref())
+        let (_, res) = get_file_response(storage_id, access_token.as_deref())
             .await
             .expect("error occured while fetching file!");
 
+        //let mut b = res.bytes().await.expect("res bytes got fucked!").to_vec();
+        //if let Some(decryptor) = &mut decryptor {
+        //    let (d_b, tag) = decryptor
+        //        .e
+        //        .pull(&b, None)
+        //        .expect("decryptor fucked (kinda expected)");
+        //    eprintln!("{tag:?}");
+        //    b = d_b;
+        //}
+        //_ = file.write(&b).await.expect("file write fucked!");
+        //return;
+
+        //let mut file_buf: Vec<u8> = vec![];
+        //file_buf = res
+        //    .bytes()
+        //    .await
+        //    .expect("bytes download error occured!")
+        //    .to_vec();
         let mut stream = res.bytes_stream();
-        let mut _first = true;
-        let mut decrypter: Option<Decrypter> = None;
-        while let Some(Ok(data)) = stream.next().await {
-            let data = data.to_vec();
-            let mut data_read_buf = data.as_slice();
+        //while let Some(Ok(data)) = stream.next().await {
+        //    let chunk = data.to_vec();
+        //    file_buf.extend(chunk);
+        //}
+        //eprintln!("file buf len: {}", file_buf.len());
 
-            if should_decrypt {
-                if _first {
-                    if data_read_buf.len() < crypto::HEADER_LENGTH {
-                        println!(
-                            "{}",
-                            "File is encrypted with invalid encryption, cannot be retreived!".red()
-                        );
-                        return;
+        //if let Some(decrypter) = decryptor {
+        //    let file_contents = decrypter
+        //        .decrypt(&file_buf)
+        //        .expect("filebuf DECRYPTION ERROR!");
+        //
+        //    eprintln!("file contents len: {}", file_contents.len());
+        //    file.write(&file_contents).await.expect("FILE WRITE ERROR!");
+        //} else {
+        //    file.write(&file_buf)
+        //        .await
+        //        .expect("FILE WRITE ERROR (normal)!");
+        //}
+
+        let mut stdout = io::stdout();
+
+        let file_stream_read_buf_size = metadata
+            .encryption
+            .as_ref()
+            .map(|e| {
+                e.block_size.unwrap_or(constants::FILE_STREAM_READ_BUF_SIZE)
+                    + streaming::ABYTES as u32
+            })
+            .unwrap_or(constants::FILE_STREAM_READ_BUF_SIZE)
+            as usize;
+
+        let blocks_stream = async_stream::stream! {
+            let mut data_buf: Vec<u8> = vec![];
+            while let Some(chunk_res) = stream.next().await {
+                let chunk = chunk_res.expect("error occured while reading stream!");
+                data_buf.extend_from_slice(&chunk);
+                eprintln!("[BLOCKS STREAM] chunk len: {}, data buf extended len: {}", chunk.len(), data_buf.len());
+                drop(chunk);
+                eprintln!("[BLOCKS STREAM] data buf extended len: {} (after chunk drop)", data_buf.len());
+
+                if data_buf.len() < file_stream_read_buf_size as usize {
+                    continue;
+                }
+                eprintln!("[BLOCKS STREAM] okay, {} >= {file_stream_read_buf_size}", data_buf.len());
+
+                let offset = (data_buf.len() / file_stream_read_buf_size) * file_stream_read_buf_size;
+                eprintln!("[BLOCKS STREAM] data_buf till offset len: {}, residual buf len: {}", data_buf[..offset].len(), data_buf[offset..].len());
+                let residual = data_buf.drain(offset..).collect::<Vec<u8>>();
+                eprintln!("[BLOCKS STREAM] data buf yield len: {}", data_buf.len());
+                yield data_buf;
+
+                data_buf = residual;
+                eprintln!("[BLOCKS STREAM] residual buf len: {}\n", data_buf.len());
+            }
+
+            eprintln!("[BLOCKS STREAM] last buf len: {}\n", data_buf.len());
+            yield data_buf;
+        };
+        let mut blocks_stream = Box::pin(blocks_stream);
+
+        eprintln!("PROCESSING BLOCKS STREAM");
+        while let Some(blocks) = blocks_stream.next().await {
+            let blocks_len = blocks.len();
+            let mut i = 0;
+            let mut c = 0;
+            eprintln!("decryption blocks_len: {blocks_len}");
+            while i < blocks.len() {
+                let slice = &blocks[i..blocks_len.min(i + file_stream_read_buf_size)];
+                eprintln!("decryption slice_len: {}", slice.len());
+                let slice = match &mut decryptor {
+                    Some(d) => {
+                        &d.e.open_chunk(slice)
+                            .expect("error occured while decrypting!")
+                            .0
                     }
+                    None => slice,
+                };
 
-                    let cipher_header: [u8; crypto::HEADER_LENGTH] = data_read_buf
-                        [0..crypto::HEADER_LENGTH]
-                        .try_into()
-                        .expect("error occured while getting encryption header!");
-                    data_read_buf = &data_read_buf[crypto::HEADER_LENGTH..];
-
-                    decrypter = Some(
-                        Decrypter::new(password.as_deref().unwrap(), cipher_header)
-                            .expect("error occured while generating decrypter!"),
-                    );
-
-                    _first = false;
-                }
-
-                let decrypter = decrypter.as_ref().unwrap();
-
-                let plaintext = decrypter
-                    .decrypt(&data_read_buf)
-                    .expect("Decryption error occured! Please check your password.");
-
-                let b_write = file
-                    .write(&plaintext)
+                _ = stdout
+                    .write_all(slice)
                     .await
-                    .expect("file incorrectly written, error occured while writing.");
-                if b_write < plaintext.len() {
-                    println!(
-                        "WARNING: only {} of {} bytes written in {}",
-                        b_write,
-                        plaintext.len(),
-                        filepath.to_str().unwrap()
-                    );
+                    .expect("write to stdout failed!");
+                if c % 10 == 0 {
+                    if let Err(err) = stdout.flush().await {
+                        eprintln!("WARNING: cannot flush stdout. error: {err}");
+                    }
                 }
-            } else {
-                let b_write = file
-                    .write(&data_read_buf)
-                    .await
-                    .expect("file incorrectly written, error occured while writing.");
-                if b_write < data_read_buf.len() {
-                    println!(
-                        "WARNING: only {} of {} bytes written in {}",
-                        b_write,
-                        data_read_buf.len(),
-                        filepath.to_str().unwrap()
-                    );
-                }
+
+                i += file_stream_read_buf_size;
+                c += 1;
             }
         }
 
-        println!("Downloaded files successfully.");
+        _ = stdout.shutdown().await;
+    }
+}
+
+impl CliSubCmd for SelectCommand {
+    async fn run(&self) {
+        let file_stream_read_buf_size = constants::FILE_STREAM_READ_BUF_SIZE;
+
+        let state = STATE.read().unwrap();
+        let wd = state.get_wd();
+
+        let abs_filepath = dirtree::get_absolute_path(&self.filepath, wd);
+        let (dirpath, filename) = dirtree::split_path(&abs_filepath);
+
+        let enc = self.upload_params.get_password().map(|p| {
+            utils::crypto::new_encryptor(&p).expect("error occured while initializing decryptor")
+        });
+        let enc_metadata = enc
+            .as_ref()
+            .map(|e| e.into_encryption_metadata(Some(file_stream_read_buf_size)));
+
+        let stdin = io::stdin();
+        let stdin_stream =
+            utils::streams::read_into_stream(stdin, file_stream_read_buf_size, enc.map(|e| e.e));
+
+        let (file, token) = futures_util::future::join(
+            async {
+                api::uploads::upload_blob_stream(
+                    stdin_stream,
+                    &self.upload_params.into_upload_metadata(
+                        filename.to_string(),
+                        dirpath.to_string(),
+                        true,
+                        enc_metadata,
+                    ),
+                )
+                .await
+                .expect("error occured while uploading file!")
+            },
+            async {
+                if self.upload_params.is_share() {
+                    match api::tokens::generate_access_token(
+                        &[format!("r:{abs_filepath}")],
+                        &self.upload_params.get_share_expiry(),
+                    )
+                    .await
+                    {
+                        Ok(token) => Some(token),
+                        Err(err) => {
+                            eprintln!("error occured while generating access token! {}", err);
+                            None
+                        }
+                    }
+                } else {
+                    None
+                }
+            },
+        )
+        .await;
+
+        if let Some(token_res) = token {
+            let access_token: shared_types::AccessToken = token_res
+                .access_token
+                .parse()
+                .expect("invalid access token returned! cannot be parsed.");
+            let url = get_share_url(
+                match self.upload_params.public {
+                    true => None,
+                    false => Some(&token_res.access_token),
+                },
+                &file.storage_id,
+            )
+            .expect("failed to generate url!");
+
+            eprintln!("\n{}\n", url.to_string().bold().cyan());
+            eprintln!(
+                "{}",
+                format!("acpl: {}", access_token.acpl.join(", ").blue()).dimmed()
+            );
+            eprintln!(
+                "{}",
+                format!(
+                    "expires at: {}",
+                    access_token
+                        .expires_at
+                        .format(constants::LOCAL_DATETIME_FORMAT)
+                        .to_string()
+                        .magenta()
+                )
+                .dimmed()
+            );
+        }
     }
 }

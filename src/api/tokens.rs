@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     api::get_sudo_builder,
-    shared_types::{ApiResponse, AppContext, DirTree},
+    shared_types::{ApiResponse, DirTree},
 };
 
 use super::get_base_url;
@@ -17,24 +17,23 @@ pub struct GenAccessTokenRes {
 }
 
 pub async fn generate_access_token(
-    ctx: &AppContext<'_>,
-    acpl: &Vec<String>,
+    acpl: &[String],
     expires_at: &DateTime<Utc>,
 ) -> anyhow::Result<GenAccessTokenRes> {
-    let mut url = super::get_base_url(ctx)?;
+    let mut url = super::get_base_url()?;
     url.set_path("access/generate-token");
 
     #[derive(Serialize)]
     #[serde(rename_all = "camelCase")]
-    struct Req {
-        acpl: Vec<String>,
-        expires_at: String,
+    struct Req<'a> {
+        acpl: &'a [String],
+        expires_at: &'a String,
     }
 
-    let res = get_sudo_builder(ctx, reqwest::Method::POST, url)?
+    let res = get_sudo_builder(reqwest::Method::POST, url)?
         .json(&Req {
-            acpl: acpl.clone(),
-            expires_at: expires_at
+            acpl,
+            expires_at: &expires_at
                 .to_utc()
                 .to_rfc3339_opts(SecondsFormat::Millis, true),
         })
@@ -59,8 +58,8 @@ pub async fn generate_access_token(
     }
 }
 
-pub async fn blacklist_token(ctx: &AppContext<'_>, tokens: &Vec<String>) -> anyhow::Result<()> {
-    let mut url = get_base_url(ctx)?;
+pub async fn blacklist_token(tokens: &Vec<String>) -> anyhow::Result<()> {
+    let mut url = get_base_url()?;
     url.set_path("/access/blacklist-token");
 
     #[derive(Serialize)]
@@ -68,7 +67,7 @@ pub async fn blacklist_token(ctx: &AppContext<'_>, tokens: &Vec<String>) -> anyh
         tokens: &'a Vec<String>,
     }
 
-    let res = get_sudo_builder(ctx, reqwest::Method::POST, url)?
+    let res = get_sudo_builder(reqwest::Method::POST, url)?
         .json(&ReqBody { tokens })
         .send()
         .await?;

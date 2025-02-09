@@ -1,13 +1,19 @@
 use phf::phf_map;
 
+pub const RANDOM_FILENAME_LEN: usize = 24;
+
 pub const UNTITLED_TAG_PREFX: &str = "untitled_";
 
 pub const ROOT_ACCESS_TOKEN_TAG: &str = "login";
 
 pub const LOCAL_DATETIME_FORMAT: &str = "%Y-%m-%d %H:%M:%S";
 
-pub const MIN_MULTIPART_UPLOAD_SIZE: i32 = 25 * 1024 * 1024;
+pub const FILE_STREAM_READ_BUF_SIZE: u32 = 256 * 1024;
 
+pub const MIN_MULTIPART_UPLOAD_SIZE: usize = 25 * 1024 * 1024;
+pub const N_MULTIPART_UPLOAD_CHUNKS: usize = 8;
+
+pub const UNKNOWN_FILE_EXT: &str = "bin";
 pub const UNKNOWN_MIME_TYPE: &str = "application/octet-stream";
 pub const ZIPFILE_MIME_TYPE: &str = "application/zip";
 pub static MIME_TYPES: phf::Map<&'static str, &'static str> = phf_map! {
@@ -89,3 +95,5 @@ pub static MIME_TYPES: phf::Map<&'static str, &'static str> = phf_map! {
     "3g2" => "video/3gpp2",
     "7z" => "application/x-7z-compressed",
 };
+
+pub const API_ERR_ALREADY_EXISTS: &str = "ERR_ALREADY_EXISTS";
