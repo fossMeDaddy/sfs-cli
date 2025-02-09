@@ -59,5 +59,5 @@ And this is all there is to SFS, no 30-hour certifications are required to move 
 Now in closed alpha, to install the CLI run:
 
 ```bash
-curl -sS https://rmd.sh/sfs | bash
+curl -sSL rmd.sh/sfs | bash
 ```
