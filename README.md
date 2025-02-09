@@ -52,7 +52,7 @@ his access by passing in `curd:/home/users/johnd092/files/*.{jpeg|jpg|png|webp}`
 to generate an access token allowing john to perform all operations (`r`ead, `c`reate, `u`pdate and `d`elete) on the files that
 are covered by the pseudo-regex string.
 
-And this is all there is to SFS, no 30-hour certifications are required to move bytes from your machine to someone else's.
+And this is all there is to SFS, no 30-hour certifications are required to move bytes between machines.
 
 ---
 
