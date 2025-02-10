@@ -10,10 +10,16 @@ use chrono::{DateTime, Duration, Utc};
 use clap::{Args, Parser};
 use colored::*;
 use futures_util::StreamExt;
+use indicatif::{ProgressBar, ProgressStyle};
 use inquire::Confirm;
 use orion::{aead::streaming, kdf};
 use serde_json::json;
-use tokio::io::{self, AsyncWriteExt};
+use tokio::{
+    fs,
+    io::{self, AsyncWriteExt},
+    sync::mpsc,
+    task,
+};
 use url::Url;
 use zip::{write::SimpleFileOptions, CompressionMethod, ZipWriter};
 
@@ -263,13 +269,21 @@ impl CliSubCmd for UploadBlobCommand {
                 .to_str()
                 .expect("invalid upload filepath! non-utf8 string provided."),
         );
+        let file_len = fs::metadata(upload_filepath)
+            .await
+            .expect("error occured while reading file! metadata could not be read.")
+            .len();
 
         println!(
             "self.exp_input {:?}",
             self.upload_params.exp_input.is_unset()
         );
 
-        let mut opts = UploadFileOpts::new(upload_filepath, password.as_deref());
+        let mut opts = UploadFileOpts::new(
+            upload_filepath.clone(),
+            password,
+            ProgressBar::new(file_len),
+        );
         opts.is_zip_file = is_zip_file;
         let fs_file = api::uploads::upload_file(
             self.upload_params.into_upload_metadata(
@@ -379,8 +393,8 @@ impl UploadBlobCommand {
 
     /// filepaths MUST BE trimmed from ref_wd by the caller
     async fn upload_files<'a, I>(
-        wd: &str,
-        ref_wd: &str,
+        wd: &'a str,
+        ref_wd: &'a str,
         filepaths: I,
         force: bool,
     ) -> anyhow::Result<()>
@@ -389,44 +403,58 @@ impl UploadBlobCommand {
     {
         let filepaths = filepaths.into_iter();
 
-        let results = futures_util::future::join_all(filepaths.clone().filter_map(|filepath| {
-            let mut path_segs: Vec<&str> = match filepath.to_str() {
-                Some(p) => p.trim_start_matches(ref_wd),
-                None => {
-                    println!(
-                        "WARNING: path '{}' is not a valid utf8 string! skipping...",
-                        filepath.to_string_lossy()
-                    );
+        let mut upload_handles = vec![];
+        for filepath in filepaths.clone() {
+            let filepath = filepath.clone();
+            let ref_wd = ref_wd.to_string();
+            let wd = wd.to_string();
 
-                    return None;
+            let handle = task::spawn_local(async move {
+                let mut path_segs: Vec<&str> = match filepath.to_str() {
+                    Some(p) => p.trim_start_matches(&ref_wd),
+                    None => {
+                        return Err(anyhow!(
+                            "WARNING: path '{}' is not a valid utf8 string! skipping...",
+                            filepath.to_string_lossy()
+                        ));
+                    }
                 }
-            }
-            .split(MAIN_SEPARATOR_STR)
-            .collect();
+                .split(MAIN_SEPARATOR_STR)
+                .collect();
 
-            let filename = match path_segs.pop() {
-                Some(name) => name,
-                None => {
-                    return None;
-                }
-            };
-            let dirpath: String = utils::dirtree::join_paths(&[wd, &path_segs.join("/")]);
+                let filename = match path_segs.pop() {
+                    Some(name) => name,
+                    None => {
+                        return Err(anyhow!(
+                            "path '{}' does not contain a filename!",
+                            filepath.to_string_lossy()
+                        ));
+                    }
+                };
+                let dirpath: String = utils::dirtree::join_paths(&[&wd, &path_segs.join("/")]);
 
-            Some(api::uploads::upload_file(
-                UploadBlobMetadata {
-                    name: filename.to_string(),
-                    content_type: None,
-                    dir_path: dirpath,
-                    is_public: false,
-                    force_write: force,
-                    encryption: None,
-                    cache_max_age_seconds: Some(0),
-                    deleted_at: None,
-                },
-                UploadFileOpts::new(filepath, None),
-            ))
-        }))
-        .await;
+                let file_len = fs::metadata(&filepath).await?.len();
+
+                Ok(api::uploads::upload_file(
+                    UploadBlobMetadata {
+                        name: filename.to_string(),
+                        content_type: None,
+                        dir_path: dirpath,
+                        is_public: false,
+                        force_write: force,
+                        encryption: None,
+                        cache_max_age_seconds: Some(0),
+                        deleted_at: None,
+                    },
+                    UploadFileOpts::new(filepath.clone(), None, ProgressBar::new(file_len)),
+                )
+                .await?)
+            });
+            upload_handles.push(handle);
+        }
+
+        let results = futures_util::future::join_all(upload_handles).await;
+        let results = results.iter().map(|r| r.as_ref().unwrap().as_ref());
 
         let mut err_msg = String::from("");
         for res in results {
@@ -786,44 +814,58 @@ impl CliSubCmd for SelectCommand {
             .as_ref()
             .map(|e| e.into_encryption_metadata(Some(file_stream_read_buf_size)));
 
-        let stdin = io::stdin();
-        let stdin_stream =
-            utils::streams::read_into_stream(stdin, file_stream_read_buf_size, enc.map(|e| e.e));
+        let (sender, mut receiver) = mpsc::unbounded_channel();
 
-        let (file, token) = futures_util::future::join(
-            async {
-                api::uploads::upload_blob_stream(
-                    stdin_stream,
-                    &self.upload_params.into_upload_metadata(
-                        filename.to_string(),
-                        dirpath.to_string(),
-                        true,
-                        enc_metadata,
-                    ),
-                )
+        let stdin = io::stdin();
+        let stdin_stream = utils::streams::read_into_stream(
+            stdin,
+            file_stream_read_buf_size,
+            enc.map(|e| e.e),
+            Some(sender),
+        );
+
+        let filename = filename.to_string();
+        let dirpath = dirpath.to_string();
+        let upload_metadata =
+            self.upload_params
+                .into_upload_metadata(filename, dirpath, true, enc_metadata);
+        let upload_handle = task::spawn(async move {
+            api::uploads::upload_blob_stream(stdin_stream, &upload_metadata)
                 .await
                 .expect("error occured while uploading file!")
-            },
-            async {
-                if self.upload_params.is_share() {
-                    match api::tokens::generate_access_token(
-                        &[format!("r:{abs_filepath}")],
-                        &self.upload_params.get_share_expiry(),
-                    )
-                    .await
-                    {
-                        Ok(token) => Some(token),
-                        Err(err) => {
-                            eprintln!("error occured while generating access token! {}", err);
-                            None
-                        }
+        });
+
+        let is_share = self.upload_params.is_share();
+        let share_exp = self.upload_params.get_share_expiry();
+        let token_handle = task::spawn(async move {
+            if is_share {
+                match api::tokens::generate_access_token(
+                    &[format!("r:{}", abs_filepath)],
+                    &share_exp,
+                )
+                .await
+                {
+                    Ok(token) => Some(token),
+                    Err(err) => {
+                        eprintln!("error occured while generating access token! {}", err);
+                        None
                     }
-                } else {
-                    None
                 }
-            },
-        )
-        .await;
+            } else {
+                None
+            }
+        });
+
+        let progress_bar = ProgressBar::new_spinner();
+        while let Some(b) = receiver.recv().await {
+            progress_bar.inc(b as u64);
+        }
+
+        let (file, token) = futures_util::future::join(upload_handle, token_handle).await;
+        progress_bar.finish();
+
+        let file = file.expect("error occured while uploading file!");
+        let token = token.expect("error occured while generating token!");
 
         if let Some(token_res) = token {
             let access_token: shared_types::AccessToken = token_res

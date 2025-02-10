@@ -7,8 +7,6 @@ use std::path::{PathBuf, MAIN_SEPARATOR_STR};
 use terminal_size::terminal_size;
 use walkdir::WalkDir;
 
-use crate::constants;
-
 use super::{term, x2str};
 
 pub fn expand_tilde<P: AsRef<Path>>(path: P) -> PathBuf {

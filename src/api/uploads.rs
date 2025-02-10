@@ -1,11 +1,12 @@
-use std::{path::PathBuf, pin::Pin};
+use std::{path::PathBuf, pin::Pin, rc::Rc, sync::Arc};
 
 use anyhow::anyhow;
 use futures_util::Stream;
+use indicatif::ProgressBar;
 use orion::aead::streaming;
 use reqwest::multipart;
 use serde::{Deserialize, Serialize};
-use tokio::{fs, io::AsyncReadExt};
+use tokio::{fs, sync::mpsc, task};
 
 use crate::{
     constants,
@@ -23,40 +24,43 @@ fn get_blob_upload_url() -> anyhow::Result<url::Url> {
     Ok(url)
 }
 
-pub struct UploadFileOpts<'a> {
-    pub upload_filepath: &'a PathBuf,
-
+pub struct UploadFileOpts {
+    pub upload_filepath: PathBuf,
     /// file is read and encrypted with this password (encryption: AES-GCM)
-    pub password: Option<&'a str>,
-
+    pub password: Option<String>,
     pub is_zip_file: bool,
-
     pub file_stream_read_buf_size: u32,
+    pub progress_bar: ProgressBar,
 }
 
-impl<'a> UploadFileOpts<'a> {
-    pub fn new(upload_filepath: &'a PathBuf, password: Option<&'a str>) -> Self {
+impl<'a> UploadFileOpts {
+    pub fn new(
+        upload_filepath: PathBuf,
+        password: Option<String>,
+        progress_bar: ProgressBar,
+    ) -> Self {
         Self {
             upload_filepath,
             password,
             is_zip_file: false,
             file_stream_read_buf_size: constants::FILE_STREAM_READ_BUF_SIZE,
+            progress_bar,
         }
     }
 
     fn new_encryptor(
         &self,
     ) -> anyhow::Result<Option<utils::crypto::CryptoStream<streaming::StreamSealer>>> {
-        match self.password {
+        match &self.password {
             Some(p) => Ok(Some(utils::crypto::new_encryptor(p)?)),
             None => Ok(None),
         }
     }
 }
 /// uploads file in chunks if file is bigger than MIN_MULTIPART_UPLOAD_SIZE
-pub async fn upload_file<'a>(
+pub async fn upload_file(
     mut upload_metadata: UploadBlobMetadata,
-    opts: UploadFileOpts<'a>,
+    opts: UploadFileOpts,
 ) -> anyhow::Result<FsFile> {
     let state = STATE.read().unwrap();
 
@@ -66,7 +70,7 @@ pub async fn upload_file<'a>(
         ));
     }
 
-    let upload_file = fs::File::open(opts.upload_filepath).await?;
+    let upload_file = fs::File::open(opts.upload_filepath.clone()).await?;
     let file_metadata = upload_file.metadata().await?;
 
     //let mut file_buf = vec![0; file_metadata.len() as usize];
@@ -141,18 +145,31 @@ pub async fn upload_file<'a>(
     //    let upload = upload_file_in_chunks(chunk_size, enc_res, &upload_metadata, &opts).await?;
     //    file = upload.file;
     //}
-    let file = upload_blob_stream(
-        utils::streams::read_into_stream(
-            upload_file,
-            opts.file_stream_read_buf_size,
-            enc_res.map(|enc| enc.e),
-        ),
-        &upload_metadata,
-    )
-    .await?;
+
+    let (sender, mut receiver) = mpsc::unbounded_channel();
+
+    let upload_metadata = Arc::new(upload_metadata);
+    let upload_handle = task::spawn(async move {
+        upload_blob_stream(
+            utils::streams::read_into_stream(
+                upload_file,
+                opts.file_stream_read_buf_size,
+                enc_res.map(|enc| enc.e),
+                Some(sender),
+            ),
+            &upload_metadata,
+        )
+        .await
+    });
+
+    while let Some(v) = receiver.recv().await {
+        opts.progress_bar.inc(v as u64);
+    }
+    let file = upload_handle.await??;
+    opts.progress_bar.finish();
 
     if opts.is_zip_file {
-        if let Err(err) = fs::remove_file(opts.upload_filepath).await {
+        if let Err(err) = fs::remove_file(opts.upload_filepath.clone()).await {
             println!(
                 "WARNING: failed to delete file '{}'\n{err}",
                 opts.upload_filepath.to_string_lossy()

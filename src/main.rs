@@ -3,7 +3,6 @@ use cmd::blob;
 use cmd::metadata::MetadataCommand;
 use cmd::tokens::TokensCommand;
 use cmd::usage::UsageCommand;
-use colored::Colorize;
 use utils::local_auth::LocalAuthData;
 
 mod api;

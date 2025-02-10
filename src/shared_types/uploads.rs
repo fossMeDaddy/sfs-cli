@@ -24,7 +24,7 @@ impl EncryptionMetadata {
     }
 }
 
-#[derive(Serialize, Debug)]
+#[derive(Serialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct UploadBlobMetadata {
     pub name: String,
