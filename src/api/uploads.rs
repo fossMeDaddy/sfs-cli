@@ -1,4 +1,4 @@
-use std::{path::PathBuf, pin::Pin, rc::Rc, sync::Arc};
+use std::{path::PathBuf, pin::Pin, sync::Arc};
 
 use anyhow::anyhow;
 use futures_util::Stream;
@@ -184,8 +184,6 @@ pub async fn upload_blob_stream(
     stream: Pin<Box<dyn Stream<Item = anyhow::Result<Vec<u8>>> + Send + 'static>>,
     upload_metadata: &UploadBlobMetadata,
 ) -> anyhow::Result<FsFile> {
-    println!("uploading blob stream {:?}", upload_metadata);
-
     let url = get_blob_upload_url()?;
 
     let file_part = reqwest::multipart::Part::stream(reqwest::Body::wrap_stream(stream))

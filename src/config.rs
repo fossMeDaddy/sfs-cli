@@ -67,7 +67,7 @@ impl CliConfig {
 
     pub fn get_gh_login_uri(&self) -> String {
         format!(
-            "https://github.com/login/oauth/authorize?client_id={}&redirect_uri={}/auth/gh-callback&scope=repo,user",
+            "https://github.com/login/oauth/authorize?client_id={}&redirect_uri={}/auth/gh-callback&scope=repo,user,user:email",
             self.github_client_id,
             self.base_url,
         )

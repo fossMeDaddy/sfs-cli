@@ -2,6 +2,7 @@ use std::{
     collections::HashSet,
     env::{current_dir, var},
     path::{Path, PathBuf, MAIN_SEPARATOR, MAIN_SEPARATOR_STR},
+    rc::Rc,
     str::FromStr,
 };
 
@@ -639,7 +640,6 @@ impl CliSubCmd for CatCommand {
         let mut decryptor: Option<utils::crypto::CryptoStream<streaming::StreamOpener>> = None;
         match &metadata.encryption {
             Some(enc_metadata) => {
-                eprintln!("enc_metadata: {enc_metadata:?}");
                 if enc_metadata.attempt_decryption {
                     let password = var("PASSWORD").unwrap_or_else(|_| {
                         dialoguer::Password::new()
@@ -731,44 +731,38 @@ impl CliSubCmd for CatCommand {
             .unwrap_or(constants::FILE_STREAM_READ_BUF_SIZE)
             as usize;
 
+        let progress_bar = Rc::new(ProgressBar::new(metadata.file_size as u64));
+
+        let prog = Rc::clone(&progress_bar);
         let blocks_stream = async_stream::stream! {
             let mut data_buf: Vec<u8> = vec![];
             while let Some(chunk_res) = stream.next().await {
                 let chunk = chunk_res.expect("error occured while reading stream!");
                 data_buf.extend_from_slice(&chunk);
-                eprintln!("[BLOCKS STREAM] chunk len: {}, data buf extended len: {}", chunk.len(), data_buf.len());
+                prog.inc(chunk.len() as u64);
                 drop(chunk);
-                eprintln!("[BLOCKS STREAM] data buf extended len: {} (after chunk drop)", data_buf.len());
 
                 if data_buf.len() < file_stream_read_buf_size as usize {
                     continue;
                 }
-                eprintln!("[BLOCKS STREAM] okay, {} >= {file_stream_read_buf_size}", data_buf.len());
 
                 let offset = (data_buf.len() / file_stream_read_buf_size) * file_stream_read_buf_size;
-                eprintln!("[BLOCKS STREAM] data_buf till offset len: {}, residual buf len: {}", data_buf[..offset].len(), data_buf[offset..].len());
                 let residual = data_buf.drain(offset..).collect::<Vec<u8>>();
-                eprintln!("[BLOCKS STREAM] data buf yield len: {}", data_buf.len());
                 yield data_buf;
 
                 data_buf = residual;
-                eprintln!("[BLOCKS STREAM] residual buf len: {}\n", data_buf.len());
             }
 
-            eprintln!("[BLOCKS STREAM] last buf len: {}\n", data_buf.len());
             yield data_buf;
         };
         let mut blocks_stream = Box::pin(blocks_stream);
 
-        eprintln!("PROCESSING BLOCKS STREAM");
         while let Some(blocks) = blocks_stream.next().await {
             let blocks_len = blocks.len();
             let mut i = 0;
             let mut c = 0;
-            eprintln!("decryption blocks_len: {blocks_len}");
             while i < blocks.len() {
                 let slice = &blocks[i..blocks_len.min(i + file_stream_read_buf_size)];
-                eprintln!("decryption slice_len: {}", slice.len());
                 let slice = match &mut decryptor {
                     Some(d) => {
                         &d.e.open_chunk(slice)
@@ -793,6 +787,7 @@ impl CliSubCmd for CatCommand {
             }
         }
 
+        progress_bar.finish_and_clear();
         _ = stdout.shutdown().await;
     }
 }
@@ -856,7 +851,10 @@ impl CliSubCmd for SelectCommand {
             }
         });
 
-        let progress_bar = ProgressBar::new_spinner();
+        let progress_bar = ProgressBar::new_spinner().with_style(
+            ProgressStyle::with_template("{spinner} [{pos}/- {bytes_per_sec}] ({elapsed})")
+                .unwrap(),
+        );
         while let Some(b) = receiver.recv().await {
             progress_bar.inc(b as u64);
         }

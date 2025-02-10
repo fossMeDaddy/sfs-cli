@@ -1,5 +1,6 @@
 use std::pin::Pin;
 
+use chrono::{Duration, Local};
 use futures_util::Stream;
 use orion::aead::streaming;
 use tokio::{io::AsyncReadExt, sync::mpsc};
@@ -15,29 +16,46 @@ where
     R: AsyncReadExt + Send + Unpin + 'static,
 {
     let stream = async_stream::try_stream! {
+        let mut chan_last_write = Local::now();
+        let mut b_written = 0;
         let mut reader = reader;
 
+        let mut buf: Vec<u8> = vec![0; read_chunk_size as usize];
         loop {
-            let mut buf: Vec<u8> = vec![0; read_chunk_size as usize];
             let mut is_last_chunk = false;
+            let mut b_read = 0;
+            while b_read < buf.len() {
+                let n = reader.read(&mut buf[b_read..]).await?;
+                b_read += n;
 
-            let b_read = reader.read(&mut buf).await?;
+                if n == 0 {
+                    is_last_chunk = true;
+                    break;
+                }
+            }
             if b_read == 0 {
                 break;
-            } else if b_read < buf.len() {
-                is_last_chunk = true;
+            }
+            if is_last_chunk {
                 buf.truncate(b_read);
             }
 
             if let Some(c) = ticks_channel.as_ref() {
-                _ = c.send(buf.len());
+                b_written += buf.len();
+
+                if (Local::now() - chan_last_write).abs() > Duration::milliseconds(100) {
+                    _ = c.send(b_written);
+
+                    b_written = 0;
+                    chan_last_write = Local::now();
+                }
             }
             yield match &mut sealer {
                 Some(s) => s.seal_chunk(&buf, match is_last_chunk {
                     true => &streaming::StreamTag::Finish,
                     false => &streaming::StreamTag::Message
                 })?,
-                None => buf
+                None => buf.clone()
             };
         }
     };
