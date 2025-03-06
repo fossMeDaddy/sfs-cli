@@ -4,6 +4,7 @@ use std::{
     path::{Path, PathBuf, MAIN_SEPARATOR, MAIN_SEPARATOR_STR},
     rc::Rc,
     str::FromStr,
+    sync::Arc,
 };
 
 use anyhow::anyhow;
@@ -11,7 +12,7 @@ use chrono::{DateTime, Duration, Utc};
 use clap::{Args, Parser};
 use colored::*;
 use futures_util::StreamExt;
-use indicatif::{ProgressBar, ProgressStyle};
+use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use inquire::Confirm;
 use orion::{aead::streaming, kdf};
 use serde_json::json;
@@ -234,26 +235,27 @@ impl CliSubCmd for UploadBlobCommand {
             }
         }
 
+        let password = self.upload_params.get_password();
+
         if self.recursive {
             let ref_wd = Self::get_ref_wd_from_paths(only_paths.clone());
 
-            println!("creating directory structure...");
+            let spinner = ProgressBar::new_spinner().with_message("creating directory tree");
+            spinner.enable_steady_tick(Duration::milliseconds(50).to_std().unwrap());
             Self::create_dirtree_from_filepaths(wd, ref_wd, only_paths.clone())
                 .await
                 .unwrap();
+            spinner.finish_and_clear();
 
-            println!("starting upload...");
-            Self::upload_files(wd, ref_wd, only_paths.clone(), self.force)
+            self.upload_files(wd, ref_wd, only_paths.clone())
                 .await
-                .unwrap();
+                .expect("files upload unsuccessful!");
 
             println!("\n{}", "files uploaded successfully.".bold());
             return;
         }
 
         let is_zip_file = paths.len() > 1;
-
-        let password = self.upload_params.get_password();
 
         let upload_filepath = if is_zip_file {
             &self.get_zipfile_from_paths(only_paths, password.as_deref())
@@ -275,15 +277,11 @@ impl CliSubCmd for UploadBlobCommand {
             .expect("error occured while reading file! metadata could not be read.")
             .len();
 
-        println!(
-            "self.exp_input {:?}",
-            self.upload_params.exp_input.is_unset()
-        );
-
         let mut opts = UploadFileOpts::new(
             upload_filepath.clone(),
             password,
-            ProgressBar::new(file_len),
+            ProgressBar::new(file_len)
+                .with_style(utils::misc::get_sized_throughput_progress_style(None)),
         );
         opts.is_zip_file = is_zip_file;
         let fs_file = api::uploads::upload_file(
@@ -337,22 +335,6 @@ impl CliSubCmd for UploadBlobCommand {
 }
 
 impl UploadBlobCommand {
-    fn get_content_type(&self, is_zip_file: bool) -> Option<String> {
-        let mut content_type: Option<String> = None;
-        if let Some(ct) = self.upload_params.content_type.as_deref() {
-            if !is_zip_file {
-                content_type = Some(
-                    constants::MIME_TYPES.values()
-                        .find(|t| *t == &ct)
-                        .expect(&format!("{} is not a valid MIME type, if you think this is an error, please report this issue.", ct))
-                        .to_string()
-                );
-            }
-        }
-
-        content_type
-    }
-
     async fn create_dirtree_from_filepaths<'a, I>(
         wd: &'a str,
         ref_wd: &'a str,
@@ -394,25 +376,47 @@ impl UploadBlobCommand {
 
     /// filepaths MUST BE trimmed from ref_wd by the caller
     async fn upload_files<'a, I>(
+        &self,
         wd: &'a str,
         ref_wd: &'a str,
         filepaths: I,
-        force: bool,
     ) -> anyhow::Result<()>
     where
         I: ExactSizeIterator<Item = &'a PathBuf> + Clone,
     {
         let filepaths = filepaths.into_iter();
+        let ref_wd = Arc::new(ref_wd.to_string());
+        let wd = Arc::new(wd.to_string());
+        let multi_progress_bar = Arc::new(MultiProgress::new());
+
+        let progress_padded_labels = filepaths.clone().map(|filepath| {
+            filepath
+                .to_string_lossy()
+                .trim_start_matches(&*ref_wd.clone())
+                .trim_start_matches(match ref_wd.len() {
+                    0 => "",
+                    _ => "/",
+                })
+                .to_string()
+        });
+        let padding = progress_padded_labels
+            .clone()
+            .fold(0, |acc, elem| acc.max(elem.len()));
+        let progress_padded_labels =
+            progress_padded_labels.map(|label| format!("{0:<1$}", label, padding));
 
         let mut upload_handles = vec![];
-        for filepath in filepaths.clone() {
+        for (filepath, progress_padded_label) in filepaths.clone().zip(progress_padded_labels) {
             let filepath = filepath.clone();
-            let ref_wd = ref_wd.to_string();
-            let wd = wd.to_string();
+            let ref_wd = ref_wd.clone();
+            let wd = wd.clone();
+            let pwd = self.upload_params.get_password();
+            let force_write = self.force;
+            let multi_progress_bar = multi_progress_bar.clone();
 
-            let handle = task::spawn_local(async move {
+            let handle = task::spawn(async move {
                 let mut path_segs: Vec<&str> = match filepath.to_str() {
-                    Some(p) => p.trim_start_matches(&ref_wd),
+                    Some(p) => p.trim_start_matches(ref_wd.as_ref()),
                     None => {
                         return Err(anyhow!(
                             "WARNING: path '{}' is not a valid utf8 string! skipping...",
@@ -436,21 +440,28 @@ impl UploadBlobCommand {
 
                 let file_len = fs::metadata(&filepath).await?.len();
 
+                let progress_bar = ProgressBar::new(file_len)
+                    .with_message(filepath.to_string_lossy().to_string())
+                    .with_style(utils::misc::get_sized_throughput_progress_style(Some(
+                        &progress_padded_label,
+                    )));
+                multi_progress_bar.add(progress_bar.clone());
                 Ok(api::uploads::upload_file(
                     UploadBlobMetadata {
                         name: filename.to_string(),
                         content_type: None,
                         dir_path: dirpath,
                         is_public: false,
-                        force_write: force,
+                        force_write,
                         encryption: None,
                         cache_max_age_seconds: Some(0),
                         deleted_at: None,
                     },
-                    UploadFileOpts::new(filepath.clone(), None, ProgressBar::new(file_len)),
+                    UploadFileOpts::new(filepath.clone(), pwd, progress_bar),
                 )
                 .await?)
             });
+
             upload_handles.push(handle);
         }
 
@@ -680,46 +691,7 @@ impl CliSubCmd for CatCommand {
         let (_, res) = get_file_response(storage_id, access_token.as_deref())
             .await
             .expect("error occured while fetching file!");
-
-        //let mut b = res.bytes().await.expect("res bytes got fucked!").to_vec();
-        //if let Some(decryptor) = &mut decryptor {
-        //    let (d_b, tag) = decryptor
-        //        .e
-        //        .pull(&b, None)
-        //        .expect("decryptor fucked (kinda expected)");
-        //    eprintln!("{tag:?}");
-        //    b = d_b;
-        //}
-        //_ = file.write(&b).await.expect("file write fucked!");
-        //return;
-
-        //let mut file_buf: Vec<u8> = vec![];
-        //file_buf = res
-        //    .bytes()
-        //    .await
-        //    .expect("bytes download error occured!")
-        //    .to_vec();
         let mut stream = res.bytes_stream();
-        //while let Some(Ok(data)) = stream.next().await {
-        //    let chunk = data.to_vec();
-        //    file_buf.extend(chunk);
-        //}
-        //eprintln!("file buf len: {}", file_buf.len());
-
-        //if let Some(decrypter) = decryptor {
-        //    let file_contents = decrypter
-        //        .decrypt(&file_buf)
-        //        .expect("filebuf DECRYPTION ERROR!");
-        //
-        //    eprintln!("file contents len: {}", file_contents.len());
-        //    file.write(&file_contents).await.expect("FILE WRITE ERROR!");
-        //} else {
-        //    file.write(&file_buf)
-        //        .await
-        //        .expect("FILE WRITE ERROR (normal)!");
-        //}
-
-        let mut stdout = io::stdout();
 
         let file_stream_read_buf_size = metadata
             .encryption
@@ -757,6 +729,7 @@ impl CliSubCmd for CatCommand {
         };
         let mut blocks_stream = Box::pin(blocks_stream);
 
+        let mut stdout = io::stdout();
         while let Some(blocks) = blocks_stream.next().await {
             let blocks_len = blocks.len();
             let mut i = 0;
@@ -852,7 +825,7 @@ impl CliSubCmd for SelectCommand {
         });
 
         let progress_bar = ProgressBar::new_spinner().with_style(
-            ProgressStyle::with_template("{spinner} [{pos}/- {bytes_per_sec}] ({elapsed})")
+            ProgressStyle::with_template("[{elapsed}] {spinner} {binary_bytes} ({bytes_per_sec})")
                 .unwrap(),
         );
         while let Some(b) = receiver.recv().await {

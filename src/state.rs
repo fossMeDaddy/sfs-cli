@@ -3,7 +3,7 @@ use std::{
     fmt::Display,
     fs, io,
     path::PathBuf,
-    sync::{Arc, LazyLock, RwLock},
+    sync::{LazyLock, RwLock},
 };
 
 use anyhow::anyhow;
@@ -34,7 +34,7 @@ impl Display for ActiveToken {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct PersistentState {
     /// (tag, token)
     pub tokens: HashMap<String, String>,

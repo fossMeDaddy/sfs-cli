@@ -64,7 +64,6 @@ pub async fn get_dirtree() -> anyhow::Result<DirTreeResponse> {
 }
 
 pub async fn mkdir(dirpath: &str) -> anyhow::Result<DirTree> {
-    println!("making dir: {dirpath}");
     let mut url = get_base_url()?;
     url.set_path("fs/mkdir");
 

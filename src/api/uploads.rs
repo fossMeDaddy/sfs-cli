@@ -62,7 +62,7 @@ pub async fn upload_file(
     mut upload_metadata: UploadBlobMetadata,
     opts: UploadFileOpts,
 ) -> anyhow::Result<FsFile> {
-    let state = STATE.read().unwrap();
+    let state = STATE.read().unwrap().clone();
 
     if state.get_active_token()?.is_none() {
         return Err(anyhow!(
@@ -71,52 +71,6 @@ pub async fn upload_file(
     }
 
     let upload_file = fs::File::open(opts.upload_filepath.clone()).await?;
-    let file_metadata = upload_file.metadata().await?;
-
-    //let mut file_buf = vec![0; file_metadata.len() as usize];
-    //upload_file
-    //    .read(&mut file_buf)
-    //    .await
-    //    .expect("reading file!");
-    //if let Some(encrypter) = opts.new_encrypter() {
-    //    upload_metadata.encryption = Some(shared_types::EncryptionMetadata {
-    //        attempt_decryption: !opts.is_zip_file,
-    //        salt: encrypter.salt.to_vec(),
-    //        nonce: encrypter.nonce.to_vec(),
-    //    });
-    //    println!("FUCK YEAH, ENCRYPTION STARTING.");
-    //    println!("before encryption size: {}", file_buf.len());
-    //    file_buf = encrypter
-    //        .encrypt_buffer(&file_buf)
-    //        .expect("file buf ciphering failed!");
-    //    println!("AFTER encryption size: {}", file_buf.len());
-    //};
-    //let mut url = get_base_url()?;
-    //url.set_path("/blob/upload");
-    //let form = reqwest::multipart::Form::new()
-    //    .part(
-    //        "file",
-    //        reqwest::multipart::Part::bytes(file_buf).file_name(upload_metadata.name.clone()),
-    //    )
-    //    .part(
-    //        "metadata",
-    //        reqwest::multipart::Part::bytes(serde_json::to_vec(&upload_metadata).unwrap()),
-    //    );
-    //let res = get_builder(reqwest::Method::POST, url)?
-    //    .multipart(form)
-    //    .send()
-    //    .await
-    //    .expect("test file buf upload reqwest failed!");
-    //let status = res.status();
-    //if !status.is_success() {
-    //    let res_text = res.text().await?;
-    //    return Err(anyhow::anyhow!("FUCK! {res_text}"));
-    //}
-    //let res_data: ApiResponse<FsFile> = res.json().await?;
-    //return res_data
-    //    .data
-    //    .ok_or(anyhow::anyhow!("WELL, FUCK. data received null"));
-
     let enc_res = opts
         .new_encryptor()
         .map_err(|_| anyhow!("error occured while creating encryptor!"))?;
@@ -128,15 +82,8 @@ pub async fn upload_file(
         },
         None => None,
     };
-    //.map(|encryptor| shared_types::EncryptionMetadata {
-    //    attempt_decryption: !opts.is_zip_file,
-    //    nonce: Some(encryptor.nonce.as_ref().to_vec()),
-    //    salt: Some(encryptor.salt.as_ref().to_vec()),
-    //    block_size: Some(file_stream_read_buf_size),
-    //});
-    println!("encryption metadata {:?}", upload_metadata.encryption);
 
-    // TODO: implement chunky upload for non-encrypted files
+    // TODO: implement multi-chunk upload for non-encrypted files
     //
     //if file_metadata.len() >= constants::MIN_MULTIPART_UPLOAD_SIZE as u64 {
     //    let chunk_size = (file_metadata.len() as f32 / constants::N_MULTIPART_UPLOAD_CHUNKS as f32)
@@ -186,15 +133,12 @@ pub async fn upload_blob_stream(
 ) -> anyhow::Result<FsFile> {
     let url = get_blob_upload_url()?;
 
-    let file_part = reqwest::multipart::Part::stream(reqwest::Body::wrap_stream(stream))
-        .file_name(upload_metadata.name.clone());
-    let metadata_part = reqwest::multipart::Part::bytes(serde_json::to_vec(upload_metadata)?);
-    let form = reqwest::multipart::Form::new()
-        .part("file", file_part)
-        .part("metadata", metadata_part);
-
     let res = get_builder(reqwest::Method::POST, url)?
-        .multipart(form)
+        .header(
+            constants::HEADER_UPLOAD_METADATA,
+            serde_json::to_string(upload_metadata)?,
+        )
+        .body(reqwest::Body::wrap_stream(stream))
         .send()
         .await?;
     let status = res.status();
@@ -212,13 +156,7 @@ pub async fn upload_blob_stream(
         .ok_or(anyhow!("received null data from API response!"))
 }
 
-// NOTE: need to check, will cloning encryptor like a basic bitch help it not randomly rotating
-// keys and nonces between parallely uploading chunks?
-// [DOESNT ALLOW CLONE]
-// unpredicatable chunks order when encrypting, not good if key rotations, nonce increments take
-// place for each encryption (probably just stick to uploading a single linear stream of encrypted
-// bytes, DISALLOW MULTIPART when encryption is on)
-// TODO: do this again, chunks might interefere
+// TODO: needs a rewrite.
 //
 //async fn upload_file_in_chunks(
 //    chunk_size: u64,

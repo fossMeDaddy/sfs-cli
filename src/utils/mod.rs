@@ -4,6 +4,7 @@ pub mod dirtree;
 pub mod files;
 pub mod filters;
 pub mod local_auth;
+pub mod misc;
 pub mod net;
 pub mod paths;
 pub mod str2x;

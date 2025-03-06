@@ -10,8 +10,7 @@ pub const LOCAL_DATETIME_FORMAT: &str = "%Y-%m-%d %H:%M:%S";
 
 pub const FILE_STREAM_READ_BUF_SIZE: u32 = 256 * 1024;
 
-pub const MIN_MULTIPART_UPLOAD_SIZE: usize = 25 * 1024 * 1024;
-pub const N_MULTIPART_UPLOAD_CHUNKS: usize = 8;
+pub const HEADER_UPLOAD_METADATA: &str = "upload-metadata";
 
 pub const UNKNOWN_FILE_EXT: &str = "bin";
 pub const UNKNOWN_MIME_TYPE: &str = "application/octet-stream";
