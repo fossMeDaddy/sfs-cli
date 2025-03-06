@@ -1,0 +1,16 @@
+name: Release Workflow
+on:
+  push:
+    tags:
+      - '*'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v2
+
+      - name: Build and Test
+        run: |
+          echo "Building the application..."
