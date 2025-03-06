@@ -76,4 +76,3 @@ jobs:
           prerelease: false
           repo_token: ${{ secrets.GH_TOKEN }}
           files: dist/*
-
