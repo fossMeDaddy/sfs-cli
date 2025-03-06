@@ -1,7 +1,7 @@
 use clap::ValueEnum;
 use std::{
     fs, io, path,
-    sync::{LazyLock, Mutex},
+    sync::{Arc, LazyLock, RwLock},
 };
 
 use serde::{Deserialize, Serialize};
@@ -67,7 +67,7 @@ impl CliConfig {
 
     pub fn get_gh_login_uri(&self) -> String {
         format!(
-            "https://github.com/login/oauth/authorize?client_id={}&redirect_uri={}/auth/gh-callback&scope=repo,user",
+            "https://github.com/login/oauth/authorize?client_id={}&redirect_uri={}/auth/gh-callback&scope=repo,user,user:email",
             self.github_client_id,
             self.base_url,
         )
@@ -90,7 +90,7 @@ impl CliConfig {
     }
 }
 
-pub static CONFIG: LazyLock<Mutex<CliConfig>> = LazyLock::new(|| {
+pub static CONFIG: LazyLock<RwLock<CliConfig>> = LazyLock::new(|| {
     let config_filepath = CliConfig::get_config_filepath();
     let file_contents = match fs::read_to_string(config_filepath) {
         Ok(contents) => contents,

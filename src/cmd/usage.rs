@@ -3,13 +3,7 @@ use std::u8;
 use clap::Parser;
 use colored::{Color, Colorize};
 
-use crate::{
-    api,
-    config::CONFIG,
-    shared_types::{AppContext, CliSubCmd},
-    state::STATE,
-    utils,
-};
+use crate::{api, shared_types::CliSubCmd, utils};
 
 #[derive(Debug)]
 struct RGB(u8, u8, u8);
@@ -38,12 +32,7 @@ pub struct UsageCommand;
 
 impl CliSubCmd for UsageCommand {
     async fn run(&self) {
-        let ctx = AppContext {
-            config: &CONFIG.try_lock().unwrap(),
-            state: &STATE.try_lock().unwrap(),
-        };
-
-        let usage = api::usage::get_api_usage(&ctx)
+        let usage = api::usage::get_api_usage()
             .await
             .expect("error occured while fetching api key usage!");
 
@@ -70,9 +59,7 @@ impl CliSubCmd for UsageCommand {
             "using: {}",
             format!(
                 "{}",
-                utils::files::get_pretty_size(
-                    (usage.storage_gb_used * 1024_i64.pow(3) as f32) as usize
-                )
+                utils::x2str::bytes2str((usage.storage_gb_used * 1024_i64.pow(3) as f32) as u64)
             )
             .bold()
         );

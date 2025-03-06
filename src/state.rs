@@ -3,7 +3,7 @@ use std::{
     fmt::Display,
     fs, io,
     path::PathBuf,
-    sync::{LazyLock, Mutex},
+    sync::{LazyLock, RwLock},
 };
 
 use anyhow::anyhow;
@@ -34,7 +34,7 @@ impl Display for ActiveToken {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct PersistentState {
     /// (tag, token)
     pub tokens: HashMap<String, String>,
@@ -62,15 +62,15 @@ impl PersistentState {
     }
 
     pub fn set_wd(&mut self, wd: &str) -> anyhow::Result<()> {
-        self.working_directory = if wd != "/" {
-            wd.trim_end_matches("/").to_string()
-        } else {
-            wd.to_string()
-        };
+        self.guard_mutate(|s| {
+            s.working_directory = if wd != "/" {
+                wd.trim_end_matches("/").to_string()
+            } else {
+                wd.to_string()
+            };
 
-        self.save()?;
-
-        Ok(())
+            Ok(())
+        })
     }
 
     pub fn get_untitled_token_tag(&self) -> String {
@@ -149,7 +149,8 @@ impl PersistentState {
     }
 }
 
-pub static STATE: LazyLock<Mutex<PersistentState>> = LazyLock::new(|| {
-    let state = PersistentState::load().expect("local state initialization errored out!");
-    Mutex::new(state)
+pub static STATE: LazyLock<RwLock<PersistentState>> = LazyLock::new(|| {
+    PersistentState::load()
+        .expect("local state initialization errored out!")
+        .into()
 });

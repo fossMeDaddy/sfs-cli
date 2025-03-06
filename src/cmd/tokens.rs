@@ -1,5 +1,5 @@
-use chrono::{DateTime, Duration, Local, Utc};
-use clap::{Args, Parser, Subcommand};
+use chrono::{DateTime, Local, Utc};
+use clap::{Parser, Subcommand};
 use colored::Colorize;
 use nucleo_matcher::{
     pattern::{AtomKind, CaseMatching, Normalization, Pattern},
@@ -7,12 +7,10 @@ use nucleo_matcher::{
 };
 
 use crate::{
-    api,
-    config::CONFIG,
-    constants,
-    shared_types::{AccessToken, AppContext, CliSubCmd},
+    api, constants,
+    shared_types::{self, AccessToken, CliSubCmd},
     state::{ActiveToken, PersistentState, STATE},
-    utils::{self, dirtree::PrintDirTreeOpts, local_auth::LocalAuthData, str2x},
+    utils::{self, dirtree::PrintDirTreeOpts, local_auth::LocalAuthData},
 };
 
 #[derive(Parser)]
@@ -25,7 +23,7 @@ pub struct TokensCommand {
 pub enum Commands {
     /// generate access tokens to grant fine-grained access to other people. use `url` command to get shareable urls for individual objects
     Generate {
-        /// enter comma-separated ACPLs e.g. "read_private:/tmp/**", "files_owner:/project1/**/*.{bin,exe}", etc.
+        /// enter comma-separated ACPLs e.g. "r:/tmp/**", "curd:/project1/**/*.{bin,exe}", etc.
         acpl: Vec<String>,
 
         #[arg(short, long)]
@@ -33,7 +31,7 @@ pub enum Commands {
         tag: Option<String>,
 
         #[command(flatten)]
-        exp_input: ExpInput,
+        exp_input: shared_types::CmdExpiryParams,
     },
 
     /// list all tagged access tokens saved locally
@@ -56,35 +54,9 @@ pub enum Commands {
     Blacklist { tokens: Vec<String> },
 }
 
-#[derive(Args)]
-#[group(multiple = false)]
-pub struct ExpInput {
-    #[arg(long, value_parser = str2x::str2datetime)]
-    /// provide an expiry datetime in your local timezone. format: %Y-%m-%d %H:%M:%S
-    expires_at: Option<DateTime<Local>>,
-
-    #[arg(long, value_parser = str2x::str2duration)]
-    /// provide a duration. format: 1d2h3m4s, default: 30m
-    ttl: Option<Duration>,
-}
-
-impl ExpInput {
-    pub fn get_expires_at(&self) -> DateTime<Utc> {
-        match self.expires_at {
-            Some(exp) => exp.to_owned().into(),
-            None => (Utc::now()
-                + match self.ttl {
-                    Some(ttl) => ttl.to_owned(),
-                    None => Duration::minutes(30),
-                })
-            .into(),
-        }
-    }
-}
-
 impl CliSubCmd for TokensCommand {
     async fn run(&self) {
-        let mut state_mut = STATE.try_lock().unwrap();
+        let mut state_mut = STATE.write().unwrap();
         _ = delete_exp_tokens(&mut state_mut);
         drop(state_mut);
 
@@ -107,7 +79,7 @@ pub async fn handle_use_token<S>(input: Option<S>)
 where
     S: AsRef<str>,
 {
-    let mut state = STATE.lock().unwrap();
+    let mut state = STATE.write().unwrap();
     let mut matcher = Matcher::new(nucleo_matcher::Config::DEFAULT);
 
     let prev_active_token = state.active_token.clone();
@@ -177,7 +149,7 @@ pub async fn handle_list_tokens<S>(tagname: Option<S>, info: bool)
 where
     S: AsRef<str>,
 {
-    let state = STATE.lock().unwrap();
+    let state = STATE.write().unwrap();
 
     let mut matcher = Matcher::new(nucleo_matcher::Config::DEFAULT);
 
@@ -274,19 +246,18 @@ where
 }
 
 pub async fn handle_blacklist_token(tokens: &Vec<String>) {
-    let ctx = AppContext {
-        config: &CONFIG.try_lock().unwrap(),
-        state: &STATE.try_lock().unwrap(),
-    };
-
-    api::tokens::blacklist_token(&ctx, &tokens)
+    api::tokens::blacklist_token(&tokens)
         .await
         .expect("error occured while blacklisting token!");
 
     println!("{}", "Token blacklisted successfully!".to_string().bold());
 }
 
-pub async fn handle_generate(acpl: &Vec<String>, tag: Option<&str>, exp_input: &ExpInput) {
+pub async fn handle_generate(
+    acpl: &Vec<String>,
+    tag: Option<&str>,
+    exp_input: &shared_types::CmdExpiryParams,
+) {
     if acpl.len() == 0 {
         println!(
             "{}",
@@ -295,15 +266,9 @@ pub async fn handle_generate(acpl: &Vec<String>, tag: Option<&str>, exp_input: &
         return;
     }
 
-    let mut state = STATE.try_lock().unwrap();
-    let ctx = AppContext {
-        config: &CONFIG.try_lock().unwrap(),
-        state: &state,
-    };
-
     let expires_at: DateTime<Utc> = exp_input.get_expires_at();
 
-    let res_data = api::tokens::generate_access_token(&ctx, &acpl, &expires_at)
+    let res_data = api::tokens::generate_access_token(&acpl, &expires_at)
         .await
         .expect("error occured while requesting API for a new access token!");
     let access_token_data: AccessToken = res_data
@@ -337,7 +302,7 @@ pub async fn handle_generate(acpl: &Vec<String>, tag: Option<&str>, exp_input: &
         "{}",
         format!(
             "example usage in URL: {}",
-            utils::files::get_share_url(Some(&res_data.access_token), "FILE_ID", &ctx)
+            utils::files::get_share_url(Some(&res_data.access_token), "FILE_ID")
                 .expect("unexpected error occured while generating base url!")
                 .to_string()
                 .blue()
@@ -350,7 +315,7 @@ pub async fn handle_generate(acpl: &Vec<String>, tag: Option<&str>, exp_input: &
     let opts = PrintDirTreeOpts::get_default_opts();
     println!("{}", res_data.dirtree.print_dir_tree(&opts));
 
-    drop(ctx);
+    let mut state = STATE.write().unwrap();
     if let Some(tag) = tag {
         _ = state.guard_mutate(|s| {
             s.tokens

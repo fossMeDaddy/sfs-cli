@@ -3,17 +3,17 @@ use std::collections::HashMap;
 use anyhow::anyhow;
 use serde::{Deserialize, Serialize};
 
-use crate::shared_types::{ApiResponse, AppContext, DirTree, FsFile};
+use crate::shared_types::{ApiResponse, DirTree, FsFile};
 
-use super::get_base_url;
+use super::{get_base_url, get_builder};
 
 pub struct DirTreeResponse {
     pub dirtree: DirTree,
     pub file_counts: HashMap<String, u32>,
 }
 
-pub async fn get_dirtree(ctx: &AppContext<'_>) -> anyhow::Result<DirTreeResponse> {
-    let mut url = super::get_base_url(ctx)?;
+pub async fn get_dirtree() -> anyhow::Result<DirTreeResponse> {
+    let mut url = super::get_base_url()?;
     url.set_path("fs/tree");
 
     let res = super::get_builder(reqwest::Method::GET, url)?
@@ -63,14 +63,45 @@ pub async fn get_dirtree(ctx: &AppContext<'_>) -> anyhow::Result<DirTreeResponse
     })
 }
 
+pub async fn mkdir(dirpath: &str) -> anyhow::Result<DirTree> {
+    let mut url = get_base_url()?;
+    url.set_path("fs/mkdir");
+
+    #[derive(Serialize)]
+    struct ReqBody<'a> {
+        path: &'a str,
+    }
+    let res = get_builder(reqwest::Method::POST, url)?
+        .json(&ReqBody { path: dirpath })
+        .send()
+        .await?;
+
+    let status = res.status();
+
+    if !status.is_success() {
+        let res_text: String = res.text().await?;
+        return Err(anyhow!(
+            "Error occured while calling 'mkdir' ({}): {}",
+            status,
+            res_text
+        ));
+    }
+
+    let res_data: ApiResponse<DirTree> = res.json().await?;
+    match res_data.data {
+        Some(data) => Ok(data),
+        None => return Err(anyhow!("no data returned!")),
+    }
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MvOpts<'a> {
     pub file_path: &'a str,
     pub new_file_path: &'a str,
 }
-pub async fn mv(ctx: &AppContext<'_>, opts: &MvOpts<'_>) -> anyhow::Result<FsFile> {
-    let mut url = get_base_url(ctx)?;
+pub async fn mv(opts: &MvOpts<'_>) -> anyhow::Result<FsFile> {
+    let mut url = get_base_url()?;
     url.set_path("/fs/mv");
 
     let res = super::get_builder(reqwest::Method::POST, url)?

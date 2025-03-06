@@ -7,6 +7,8 @@ use std::path::{PathBuf, MAIN_SEPARATOR_STR};
 use terminal_size::terminal_size;
 use walkdir::WalkDir;
 
+use super::{term, x2str};
+
 pub fn expand_tilde<P: AsRef<Path>>(path: P) -> PathBuf {
     let p = path.as_ref();
     if let Some(stripped) = p.strip_prefix("~").ok() {
@@ -48,19 +50,13 @@ pub fn get_absolute_path<P: AsRef<Path>>(path: P) -> io::Result<PathBuf> {
     Ok(absolute(canonicalize(expand_tilde(path))?)?)
 }
 
-pub fn get_paths_from_pattern(patt: &str) -> anyhow::Result<Vec<PathBuf>> {
+pub fn get_paths_from_pattern(patt: &str) -> anyhow::Result<Vec<(u64, PathBuf)>> {
     let patt = get_absolute_path(patt)?;
 
-    let mut paths: Vec<PathBuf> = vec![];
-    let mut ref_wd = PathBuf::new();
+    let mut paths: Vec<(u64, PathBuf)> = vec![];
+    let mut ref_wd = PathBuf::from("/");
 
-    for path_str in patt.iter() {
-        let path_str = path_str.to_str();
-        let path_str = match path_str {
-            None => continue,
-            Some(path_str) => path_str,
-        };
-
+    for path_str in patt.to_string_lossy().split(MAIN_SEPARATOR) {
         if path_str.contains("*") || path_str.contains("{") || path_str.contains("}") {
             break;
         }
@@ -70,13 +66,15 @@ pub fn get_paths_from_pattern(patt: &str) -> anyhow::Result<Vec<PathBuf>> {
 
     if ref_wd.to_str().unwrap_or("") == patt.to_str().unwrap_or("") {
         if ref_wd.is_file() {
-            paths.push(ref_wd);
+            let metadata = ref_wd.metadata()?;
+            paths.push((metadata.len(), ref_wd));
         } else if ref_wd.is_dir() {
             for entry in ref_wd.read_dir()? {
                 let entry = entry?;
                 let path = entry.path();
                 if path.is_file() {
-                    paths.push(path);
+                    let metadata = path.metadata()?;
+                    paths.push((metadata.len(), path));
                 }
             }
         }
@@ -96,7 +94,6 @@ pub fn get_paths_from_pattern(patt: &str) -> anyhow::Result<Vec<PathBuf>> {
         .replace(']', r"\]")
         .replace('-', r"\-")
         .replace('.', r"\.")
-        .replace('|', r"\|")
         .replace("**", r".+")
         .replace("*", format!(r"[^\{}]*", MAIN_SEPARATOR_STR).as_str());
 
@@ -116,29 +113,44 @@ pub fn get_paths_from_pattern(patt: &str) -> anyhow::Result<Vec<PathBuf>> {
 
     for entry in WalkDir::new(&ref_wd) {
         let entry = entry?;
+        let metadata = entry.metadata()?;
         let path = entry.path();
 
         if path.is_file() && patt_regex.is_match(path.to_str().unwrap_or("")) {
-            paths.push(path.to_path_buf());
+            paths.push((metadata.len(), path.to_path_buf()));
         }
     }
 
-    println!();
     Ok(paths)
 }
 
+fn get_file_str(path_str: &str, filesize: Option<u64>) -> String {
+    format!(
+        "{path_str}{}",
+        match filesize {
+            Some(s) => format!(" ({})", x2str::bytes2str(s)),
+            None => "".to_string(),
+        }
+    )
+}
+
 /// returns ref path and pretty printed paths
-pub fn get_pretty_paths(paths: &Vec<PathBuf>) -> (String, String) {
+pub fn get_pretty_paths<'a, I>(paths: I) -> (String, String)
+where
+    I: ExactSizeIterator<Item = (u64, &'a PathBuf)> + Clone,
+{
+    let paths = paths.into_iter();
+
     let mut ref_wd: Option<&str> = None;
 
     let mut max_col_size = 0;
-    for path in paths {
+    for (filesize, path) in paths.clone() {
         let path_str = match path.to_str() {
             Some(path_str) => path_str,
             None => continue,
         };
 
-        max_col_size = max_col_size.max(path_str.len());
+        max_col_size = max_col_size.max(get_file_str(&path_str, Some(filesize)).len());
 
         ref_wd = match ref_wd {
             Some(ref_wd) => {
@@ -182,12 +194,13 @@ pub fn get_pretty_paths(paths: &Vec<PathBuf>) -> (String, String) {
         None => 1,
     };
 
-    let str_iter = paths.iter().map(|path| {
-        path.to_string_lossy()
-            .trim_start_matches(ref_wd)
-            .to_string()
+    let str_iter = paths.clone().map(|(filesize, path)| {
+        get_file_str(
+            path.to_string_lossy().trim_start_matches(ref_wd),
+            Some(filesize),
+        )
     });
-    let output_str = super::term::get_formatted_cols(str_iter.into_iter(), n_cols);
+    let output_str = term::get_formatted_cols(str_iter, n_cols);
 
     (ref_wd.to_string(), output_str)
 }

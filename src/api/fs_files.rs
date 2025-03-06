@@ -4,20 +4,23 @@ use serde::{Deserialize, Serialize};
 use serde_with::skip_serializing_none;
 
 use crate::{
-    shared_types::{ApiResponse, AppContext, FsFile},
-    utils::filters::parse_filter_str,
+    shared_types::{ApiResponse, FsFile},
+    utils,
 };
 
 #[derive(Args)]
 pub struct CliColFilters {
     #[arg(long)]
-    pub deleted_at: Vec<String>, // "<,>,=2024-01-01 14:14:14" OR "2024-01-01 14:14:14...2024-01-01 16:14:14"
+    /// format: "2024-01-01 14:14:14...2024-01-01 16:14:14" OR "...2024-01-01 16:14:14" OR "2024-01-01 16:14:14..."
+    pub deleted_at: Vec<String>,
 
     #[arg(long)]
+    /// format: "2024-01-01 14:14:14...2024-01-01 16:14:14" OR "...2024-01-01 16:14:14" OR "2024-01-01 16:14:14..."
     pub created_at: Vec<String>,
 
     #[arg(long)]
-    pub file_size: Vec<String>, // 25.0kb, 12mb, 0 (b)
+    /// format: "12kb...69.42mb" OR "...5mb" OR "512b..."
+    pub file_size: Vec<String>,
 }
 
 impl CliColFilters {
@@ -25,13 +28,22 @@ impl CliColFilters {
         let mut filters: Vec<Filter> = vec![];
 
         for filter_str in &self.deleted_at {
-            filters.extend(parse_filter_str(FilterCol::DeletedAt, &filter_str)?);
+            filters.extend(utils::filters::parse_filter_str(
+                FilterCol::DeletedAt,
+                &filter_str,
+            )?);
         }
         for filter_str in &self.created_at {
-            filters.extend(parse_filter_str(FilterCol::CreatedAt, &filter_str)?);
+            filters.extend(utils::filters::parse_filter_str(
+                FilterCol::CreatedAt,
+                &filter_str,
+            )?);
         }
         for filter_str in &self.file_size {
-            filters.extend(parse_filter_str(FilterCol::FileSize, &filter_str)?);
+            filters.extend(utils::filters::parse_filter_str(
+                FilterCol::FileSize,
+                &filter_str,
+            )?);
         }
 
         Ok(filters)
@@ -43,20 +55,23 @@ impl CliColFilters {
 pub enum FilterCol {
     CreatedAt,
     DeletedAt,
-    FileType,
+    ContentType,
+    Encryption,
     FileSize,
-    IsEncrypted,
     IsPublic,
     Name,
 }
 
-#[derive(Serialize, Debug)]
-#[serde(rename_all = "lowercase")]
+#[derive(Serialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
 pub enum FilterOp {
     Gt,
     Lt,
     Eq,
     Ne,
+    IsNull,
+    IsNotNull,
+    Like,
 }
 
 #[derive(Serialize, Parser, Debug, ValueEnum, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -74,30 +89,53 @@ pub enum Order {
     Desc,
 }
 
-#[derive(Serialize, Debug)]
+#[derive(Serialize, Debug, Clone)]
 pub struct Filter(pub FilterCol, pub FilterOp, pub serde_json::Value);
+
+#[derive(Serialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub enum FilterGroupType {
+    And,
+    Or,
+}
+
+#[derive(Serialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct FilterGroup {
+    pub type_: FilterGroupType,
+    pub filters: Vec<Filter>,
+}
 
 #[derive(Serialize, Debug)]
 #[serde(rename_all = "camelCase")]
-pub struct GetFilesOpts<'a> {
-    pub dir_path: &'a str,
-    pub filters: Option<&'a Vec<Filter>>,
+pub struct GetFilesOpts {
+    pub dir_path: String,
+    pub filters: Option<Vec<FilterGroup>>,
     pub limit: Option<usize>,
     pub page: Option<usize>,
     pub order_by: Option<OrderCol>,
     pub order: Option<Order>,
 }
 
-impl<'a> GetFilesOpts<'a> {
+impl GetFilesOpts {
     /// takes in valid `dir_path`
-    pub fn new(dir_path: &'a str, filters: Option<&'a Vec<Filter>>) -> Self {
+    pub fn new(dir_path: String) -> Self {
+        let filters: Vec<FilterGroup> = vec![];
         Self {
             dir_path,
-            filters,
+            filters: Some(filters),
             page: None,
             limit: None,
             order: None,
             order_by: None,
+        }
+    }
+
+    pub fn add_filter_group(&mut self, group: FilterGroup) {
+        if let Some(f) = &mut self.filters {
+            f.push(group);
+        } else {
+            self.filters = Some(vec![group]);
         }
     }
 }
@@ -110,11 +148,8 @@ pub struct GetFilesReqBody {
     pub page_size: usize,
 }
 
-pub async fn get_files(
-    ctx: &AppContext<'_>,
-    opts: Option<GetFilesOpts<'_>>,
-) -> anyhow::Result<GetFilesReqBody> {
-    let mut url = super::get_base_url(ctx)?;
+pub async fn get_files(opts: Option<GetFilesOpts>) -> anyhow::Result<GetFilesReqBody> {
+    let mut url = super::get_base_url()?;
 
     url.set_path(&format!("fs/get-files"));
 
@@ -147,20 +182,26 @@ pub async fn get_files(
     }
 }
 
-/// provides successful response object to run `.bytes_stream()` on
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PublicFileMetadata {
-    pub is_encrypted: bool,
-    pub name: String,
+pub async fn get_file(abs_filepath: &str) -> anyhow::Result<Option<FsFile>> {
+    let (dirpath, filename) = utils::dirtree::split_path(abs_filepath);
+
+    let filters = vec![Filter(FilterCol::Name, FilterOp::Eq, filename.into())];
+    let mut opts = GetFilesOpts::new(dirpath.to_string());
+    opts.add_filter_group(FilterGroup {
+        type_: FilterGroupType::And,
+        filters,
+    });
+
+    let mut res_files = get_files(Some(opts)).await?;
+
+    Ok(res_files.files.pop())
 }
 
 pub async fn get_file_response(
-    ctx: &AppContext<'_>,
     storage_id: &str,
     token: Option<&str>,
-) -> anyhow::Result<(PublicFileMetadata, Response)> {
-    let mut url = super::get_base_url(ctx)?;
+) -> anyhow::Result<(FsFile, Response)> {
+    let mut url = super::get_base_url()?;
 
     url.set_path(storage_id);
     if let Some(token) = token {
@@ -180,7 +221,7 @@ pub async fn get_file_response(
         ));
     }
 
-    let public_file_metadata: PublicFileMetadata = match res.headers().get("metadata") {
+    let public_file_metadata: FsFile = match res.headers().get("metadata") {
         Some(value) => serde_json::from_str(value.to_str()?)?,
         None => return Err(anyhow::anyhow!("file metadata not found in response!")),
     };
@@ -188,12 +229,8 @@ pub async fn get_file_response(
     Ok((public_file_metadata, res))
 }
 
-pub async fn get_file_metadata(
-    ctx: &AppContext<'_>,
-    storage_id: &str,
-    token: Option<&str>,
-) -> anyhow::Result<PublicFileMetadata> {
-    let mut url = super::get_base_url(ctx)?;
+pub async fn get_file_metadata(storage_id: &str, token: Option<&str>) -> anyhow::Result<FsFile> {
+    let mut url = super::get_base_url()?;
 
     url.set_path(&format!("metadata/{}", storage_id));
     if let Some(token) = token {
@@ -213,7 +250,7 @@ pub async fn get_file_metadata(
         ));
     }
 
-    let res_data = res.json::<ApiResponse<PublicFileMetadata>>().await?;
+    let res_data = res.json::<ApiResponse<FsFile>>().await?;
     match res_data.data {
         Some(data) => Ok(data),
         None => {
@@ -236,11 +273,8 @@ pub struct SetMetadata<'a> {
     pub name: Option<&'a str>,
 }
 
-pub async fn set_file_metadata(
-    ctx: &AppContext<'_>,
-    metadata: SetMetadata<'_>,
-) -> anyhow::Result<()> {
-    let mut url = super::get_base_url(&ctx)?;
+pub async fn set_file_metadata(metadata: SetMetadata<'_>) -> anyhow::Result<()> {
+    let mut url = super::get_base_url()?;
     url.set_path("/blob/set-metadata");
 
     let res = super::get_builder(reqwest::Method::POST, url)?
@@ -268,11 +302,8 @@ pub struct DeleteFilesReqBody<'a> {
     pub file_names: &'a Vec<String>,
 }
 
-pub async fn delete_files(
-    ctx: &AppContext<'_>,
-    opts: &DeleteFilesReqBody<'_>,
-) -> anyhow::Result<Vec<FsFile>> {
-    let mut url = super::get_base_url(ctx)?;
+pub async fn delete_files(opts: &DeleteFilesReqBody<'_>) -> anyhow::Result<Vec<FsFile>> {
+    let mut url = super::get_base_url()?;
     url.set_path(&format!("/blob/delete"));
 
     let res = super::get_builder(reqwest::Method::POST, url)?

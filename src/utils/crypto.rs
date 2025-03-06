@@ -1,95 +1,48 @@
-use aes_gcm::{
-    aead::{generic_array::GenericArray, Aead, KeyInit, OsRng},
-    AeadCore, Aes256Gcm, Nonce,
+use orion::{
+    aead::streaming::{self, StreamSealer},
+    kdf,
 };
-use pbkdf2::pbkdf2_hmac;
-use rand::RngCore;
-use sha2::{
-    digest::{
-        consts::{B0, B1},
-        typenum::{UInt, UTerm},
-    },
-    Sha256,
-};
-use std::num::NonZeroU32;
 
-pub const NONCE_LENGTH: usize = 12;
-pub const SALT_LENGTH: usize = 16;
-pub const KEY_LENGTH: usize = 32;
-pub const HEADER_LENGTH: usize = NONCE_LENGTH + SALT_LENGTH;
+use crate::shared_types;
 
-fn derive_key_from_password(password: &str, salt: &[u8]) -> [u8; KEY_LENGTH] {
-    let mut key = [0u8; KEY_LENGTH];
-    let iterations = NonZeroU32::new(100_000).unwrap();
-    pbkdf2_hmac::<Sha256>(password.as_bytes(), salt, iterations.into(), &mut key);
-    key
+// takes in stream_sealer or stream_opener as `T`
+pub struct CryptoStream<T> {
+    pub e: T,
+    pub salt: kdf::Salt,
+    pub nonce: streaming::Nonce,
 }
 
-type CipherNonce = Nonce<UInt<UInt<UInt<UInt<UTerm, B1>, B1>, B0>, B0>>;
-
-pub struct Decrypter {
-    pub nonce: CipherNonce,
-    pub key: [u8; KEY_LENGTH],
-}
-
-impl Decrypter {
-    pub fn new(
-        password: &str,
-        cipher_header: [u8; NONCE_LENGTH + SALT_LENGTH],
-    ) -> anyhow::Result<Self> {
-        let (salt, nonce_bytes) = cipher_header.split_at(SALT_LENGTH);
-        let nonce = GenericArray::from_slice(nonce_bytes);
-
-        Ok(Self {
-            nonce: nonce.to_owned().try_into()?,
-            key: derive_key_from_password(password, salt),
-        })
-    }
-
-    /// receives a ciphertext, the ciphertext should NOT contain nonce or salt or any other metadata
-    pub fn decrypt(&self, ciphertext: &[u8]) -> anyhow::Result<Vec<u8>> {
-        let cipher = Aes256Gcm::new_from_slice(&self.key)?;
-        let plaintext = match cipher.decrypt(&self.nonce, ciphertext) {
-            Ok(ciphertext) => ciphertext,
-            Err(err) => {
-                return Err(anyhow::anyhow!(err));
-            }
-        };
-
-        Ok(plaintext)
+impl CryptoStream<StreamSealer> {
+    pub fn into_encryption_metadata(
+        &self,
+        block_size: Option<u32>,
+    ) -> shared_types::EncryptionMetadata {
+        shared_types::EncryptionMetadata {
+            attempt_decryption: true,
+            block_size,
+            nonce: Some(self.nonce.as_ref().to_vec()),
+            salt: Some(self.salt.as_ref().to_vec()),
+        }
     }
 }
 
-pub struct Encrypter {
-    pub key: [u8; KEY_LENGTH],
-    pub nonce: CipherNonce,
-    pub salt: [u8; SALT_LENGTH],
+pub fn derive_key_from_password(
+    pwd: &[u8],
+    salt: &kdf::Salt,
+) -> Result<kdf::SecretKey, orion::errors::UnknownCryptoError> {
+    let pwd = kdf::Password::from_slice(pwd)?;
+    kdf::derive_key(&pwd, salt, 3, 8, 32)
 }
 
-impl Encrypter {
-    pub fn new(password: &str) -> Self {
-        let mut salt = [0u8; SALT_LENGTH];
-        OsRng.fill_bytes(&mut salt);
-
-        let key = derive_key_from_password(password, &salt);
-        let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
-
-        return Self { key, salt, nonce };
-    }
-
-    pub fn encrypt_buffer(&self, plaintext: &[u8]) -> anyhow::Result<Vec<u8>> {
-        let cipher = Aes256Gcm::new_from_slice(&self.key)?;
-
-        let ciphertext = match cipher.encrypt(&self.nonce, plaintext) {
-            Ok(ciphertext) => ciphertext,
-            Err(err) => return Err(anyhow::anyhow!("Error encrypting message: {}", err)),
-        };
-
-        let mut encrypted_message = Vec::new();
-        encrypted_message.extend_from_slice(&self.salt);
-        encrypted_message.extend_from_slice(&self.nonce);
-        encrypted_message.extend_from_slice(&ciphertext);
-
-        Ok(encrypted_message)
-    }
+pub fn new_encryptor(
+    password: &str,
+) -> Result<CryptoStream<streaming::StreamSealer>, orion::errors::UnknownCryptoError> {
+    let salt = kdf::Salt::default();
+    let (sealer, nonce) =
+        streaming::StreamSealer::new(&derive_key_from_password(password.as_bytes(), &salt)?)?;
+    Ok(CryptoStream {
+        e: sealer,
+        salt,
+        nonce,
+    })
 }

@@ -15,7 +15,7 @@ pub struct ConfigCommand {
 
 impl CliSubCmd for ConfigCommand {
     async fn run(&self) {
-        let mut config = CONFIG.try_lock().unwrap();
+        let mut config = CONFIG.write().unwrap();
 
         match self.set_log_level.clone() {
             Some(log_level) => config

@@ -1,16 +1,14 @@
 use anyhow::anyhow;
 
-use crate::shared_types::{ApiKeyUsage, ApiResponse, AppContext};
+use crate::shared_types::{ApiKeyUsage, ApiResponse};
 
 use super::get_sudo_builder;
 
-pub async fn get_api_usage(ctx: &AppContext<'_>) -> anyhow::Result<ApiKeyUsage> {
-    let mut url = super::get_base_url(ctx)?;
+pub async fn get_api_usage() -> anyhow::Result<ApiKeyUsage> {
+    let mut url = super::get_base_url()?;
     url.set_path("/usage");
 
-    let res = get_sudo_builder(ctx, reqwest::Method::GET, url)?
-        .send()
-        .await?;
+    let res = get_sudo_builder(reqwest::Method::GET, url)?.send().await?;
     let res_status = res.status();
 
     if !res_status.is_success() {

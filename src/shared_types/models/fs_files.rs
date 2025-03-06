@@ -1,18 +1,19 @@
 use chrono::{DateTime, Local};
 use serde::Deserialize;
 
-use crate::{constants, utils::files};
+use crate::{constants, shared_types, utils::files};
 
 #[derive(Debug, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct FsFile {
     pub name: String,
     pub storage_id: String,
+    pub content_type: Option<String>,
     pub cache_max_age_seconds: u64,
     pub file_system_id: String,
     pub dir_id: String,
     pub file_size: usize,
-    pub is_encrypted: bool,
+    pub encryption: Option<shared_types::EncryptionMetadata>,
     pub is_public: bool,
     pub created_at: DateTime<Local>,
     pub updated_at: DateTime<Local>,

@@ -1,6 +1,6 @@
 use clap::Parser;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use tiny_http::Server;
 
 use crate::utils::net::get_local_addr;
@@ -14,13 +14,13 @@ pub struct ServeCommand {
 
 impl CliSubCmd for ServeCommand {
     async fn run(&self) {
-        let mut paths = self
+        let mut paths: Vec<_> = self
             .patterns
             .iter()
             .flat_map(|patt| get_paths_from_pattern(patt).unwrap())
-            .collect::<Vec<PathBuf>>();
+            .collect();
 
-        paths.sort();
+        paths.sort_by(|a, b| a.1.cmp(&b.1));
         paths.dedup();
 
         println!("Files selected: {}", paths.len());
@@ -35,7 +35,7 @@ impl CliSubCmd for ServeCommand {
 
             if request.url() == "/" {
                 let mut html = String::from("<ol>");
-                for path in &paths {
+                for (_, path) in &paths {
                     let path_str = path.to_str().unwrap();
                     html += &format!(
                         "<li><a href=\"/file/{}\">{}</a></li>",

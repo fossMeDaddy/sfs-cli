@@ -1,7 +1,7 @@
 use anyhow::anyhow;
 use serde::{Deserialize, Serialize};
 
-use crate::shared_types::{ApiKey, ApiResponse, AppContext};
+use crate::shared_types::{ApiKey, ApiResponse};
 
 use super::{get_base_url, get_builder};
 
@@ -11,8 +11,8 @@ pub struct ResData {
     pub access_token: String,
     pub api_key: ApiKey,
 }
-pub async fn login(ctx: &AppContext<'_>, key: &str) -> anyhow::Result<ResData> {
-    let mut url = get_base_url(ctx)?;
+pub async fn login(key: &str) -> anyhow::Result<ResData> {
+    let mut url = get_base_url()?;
     url.set_path("auth/gh-cli-login");
     url.query_pairs_mut().append_pair("key", key);
 

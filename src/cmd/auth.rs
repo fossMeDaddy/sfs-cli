@@ -2,13 +2,7 @@ use clap::{Parser, Subcommand};
 use colored::*;
 use inquire::Text;
 
-use crate::{
-    api,
-    config::CONFIG,
-    shared_types::{AppContext, CliSubCmd},
-    state::STATE,
-    utils::local_auth,
-};
+use crate::{api, config::CONFIG, shared_types::CliSubCmd, utils::local_auth};
 
 #[derive(Parser)]
 pub struct AuthCommand {
@@ -25,14 +19,10 @@ enum Commands {
 
 impl AuthCommand {
     async fn handle_login(&self) {
-        let ctx = AppContext {
-            config: &CONFIG.try_lock().unwrap(),
-            state: &STATE.try_lock().unwrap(),
-        };
-
+        let config = CONFIG.read().unwrap();
         println!(
             "Please copy and paste this oauth url in your browser:\n{}\n",
-            ctx.config.get_gh_login_uri().blue(),
+            config.get_gh_login_uri().blue(),
         );
 
         print!("{}", String::from("Note: ").bright_black());
@@ -51,7 +41,7 @@ impl AuthCommand {
 
         let code = Text::new("Enter login code:").prompt().unwrap();
 
-        let credentials = api::auth::login(&ctx, &code)
+        let credentials = api::auth::login(&code)
             .await
             .expect("Error occured while logging in!");
 
