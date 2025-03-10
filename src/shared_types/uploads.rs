@@ -14,7 +14,7 @@ pub struct EncryptionMetadata {
     pub block_size: Option<u32>,
 }
 impl EncryptionMetadata {
-    pub fn default_zipfile() -> Self {
+    pub fn no_encryption() -> Self {
         Self {
             attempt_decryption: false,
             nonce: None,

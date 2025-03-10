@@ -1,16 +1,14 @@
 use std::pin::Pin;
 
-use chrono::{Duration, Local};
 use futures_util::Stream;
 use orion::aead::streaming;
 use tokio::{io::AsyncReadExt, sync::mpsc};
 
-/// DO NOT PROVIDE BAD `read_size`.
 pub fn read_into_stream<'a, R>(
     reader: R,
     read_chunk_size: u32,
     mut sealer: Option<streaming::StreamSealer>,
-    ticks_channel: Option<mpsc::UnboundedSender<usize>>,
+    ticks_updater: Option<mpsc::UnboundedSender<usize>>,
 ) -> Pin<Box<impl Stream<Item = anyhow::Result<Vec<u8>>> + Send + 'static>>
 where
     R: AsyncReadExt + Send + Unpin + 'static,
@@ -38,7 +36,7 @@ where
                 buf.truncate(b_read);
             }
 
-            if let Some(c) = ticks_channel.as_ref() {
+            if let Some(c) = ticks_updater.as_ref() {
                 _ = c.send(b_read);
             }
             yield match &mut sealer {

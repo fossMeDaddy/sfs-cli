@@ -12,6 +12,8 @@ pub const FILE_STREAM_READ_BUF_SIZE: u32 = 256 * 1024;
 
 pub const HEADER_UPLOAD_METADATA: &str = "upload-metadata";
 
+pub const MP_CHUNK_SIZE: u64 = 256 * 1024 * 1024;
+
 pub const UNKNOWN_FILE_EXT: &str = "bin";
 pub const UNKNOWN_MIME_TYPE: &str = "application/octet-stream";
 pub const ZIPFILE_MIME_TYPE: &str = "application/zip";

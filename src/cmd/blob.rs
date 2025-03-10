@@ -26,7 +26,11 @@ use url::Url;
 use zip::{write::SimpleFileOptions, CompressionMethod, ZipWriter};
 
 use crate::{
-    api::{self, fs_files::*, uploads::UploadFileOpts},
+    api::{
+        self,
+        fs_files::*,
+        uploads::{ProgressStat, UploadFileOpts},
+    },
     constants,
     shared_types::{
         self, AccessTokenPermission, CliSubCmd, FsFile, PermissionChar, UploadBlobMetadata,
@@ -277,24 +281,30 @@ impl CliSubCmd for UploadBlobCommand {
             .expect("error occured while reading file! metadata could not be read.")
             .len();
 
-        let mut opts = UploadFileOpts::new(
-            upload_filepath.clone(),
-            password,
-            ProgressBar::new(file_len)
-                .with_style(utils::misc::get_sized_throughput_progress_style(None)),
-        );
+        let (progress_sender, mut progress_receiver) = mpsc::unbounded_channel();
+        let progress_bar = ProgressBar::new(file_len)
+            .with_style(utils::misc::get_sized_throughput_progress_style(None));
+
+        let mut opts = UploadFileOpts::new(upload_filepath.to_path_buf(), password);
         opts.is_zip_file = is_zip_file;
-        let fs_file = api::uploads::upload_file(
-            self.upload_params.into_upload_metadata(
-                filename.to_string(),
-                upload_dirpath.clone(),
-                self.force,
-                None,
-            ),
-            opts,
-        )
-        .await
-        .expect("error occured while uploading file!");
+        let _upload_metadata = self.upload_params.into_upload_metadata(
+            filename.to_string(),
+            upload_dirpath.clone(),
+            self.force,
+            None,
+        );
+        let upload_handle = tokio::spawn(async move {
+            api::uploads::upload_file(_upload_metadata, &opts, progress_sender)
+                .await
+                .expect("error occured while uploading file!")
+        });
+
+        while let Some(progress) = progress_receiver.recv().await {
+            progress_bar.inc(progress.increment as u64);
+        }
+        let fs_file = upload_handle
+            .await
+            .expect("error occured while uploading file!");
 
         if self.upload_params.is_share() {
             let share_url: String;
@@ -307,7 +317,7 @@ impl CliSubCmd for UploadBlobCommand {
                 let acpl: Vec<String> = vec![tokens::get_acp(
                     AccessTokenPermission::from_str(&PermissionChar::Read.to_string())
                         .expect("Error occured while parsing read access token permission"),
-                    &format!("{}/{}", upload_dirpath, fs_file.name),
+                    &format!("{}/{}", upload_dirpath.to_string(), fs_file.name),
                 )];
                 let expires_at = self.upload_params.get_share_expiry();
 
@@ -446,20 +456,29 @@ impl UploadBlobCommand {
                         &progress_padded_label,
                     )));
                 multi_progress_bar.add(progress_bar.clone());
-                Ok(api::uploads::upload_file(
-                    UploadBlobMetadata {
-                        name: filename.to_string(),
-                        content_type: None,
-                        dir_path: dirpath,
-                        is_public: false,
-                        force_write,
-                        encryption: None,
-                        cache_max_age_seconds: Some(0),
-                        deleted_at: None,
-                    },
-                    UploadFileOpts::new(filepath.clone(), pwd, progress_bar),
-                )
-                .await?)
+
+                let (progress_sender, mut progress_receiver) =
+                    mpsc::unbounded_channel::<ProgressStat>();
+
+                let upload_metadata = UploadBlobMetadata {
+                    name: filename.to_string(),
+                    content_type: None,
+                    dir_path: dirpath,
+                    is_public: false,
+                    force_write,
+                    encryption: None,
+                    cache_max_age_seconds: Some(0),
+                    deleted_at: None,
+                };
+                let opts = UploadFileOpts::new(filepath.clone(), pwd);
+                let handle = tokio::spawn(async move {
+                    api::uploads::upload_file(upload_metadata, &opts, progress_sender).await
+                });
+                while let Some(tic) = progress_receiver.recv().await {
+                    progress_bar.inc(tic.increment as u64);
+                }
+
+                Ok(handle.await??)
             });
 
             upload_handles.push(handle);
